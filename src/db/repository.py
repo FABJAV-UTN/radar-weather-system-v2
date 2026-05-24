@@ -1,3 +1,4 @@
+
 # src/db/repository.py
 """
 Patrón Repository: toda la lógica de acceso a datos en un único lugar.
@@ -420,3 +421,4 @@ class UsuarioRepository:
             .where(Usuario.id == usuario_id)
             .values(rol=rol)
         )
+

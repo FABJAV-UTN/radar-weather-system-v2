@@ -1,10 +1,9 @@
+
 version: '3.8'
 
 services:
-  # ── Base de datos ──────────────────────────────────────────────────────
   db:
     image: postgis/postgis:16-3.4
-    container_name: radar_db
     environment:
       POSTGRES_DB: radar_db
       POSTGRES_USER: radar
@@ -18,48 +17,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - radar_network
-
-  # ── Backend API ──────────────────────────────────────────────────────────
-  backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    container_name: radar_backend
-    environment:
-      DATABASE_URL: postgresql+asyncpg://radar:radar@db:5432/radar_db
-      SECRET_KEY: ${SECRET_KEY:-cambia-esta-clave-en-produccion-minimo-32-caracteres}
-      RADAR_URL: https://www2.contingencias.mendoza.gov.ar/radar/latest.gif
-      TEMPLATE_DIR: /app/templates
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./templates:/app/templates:ro
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - radar_network
-    #command: >
-     # sh -c "uv run alembic upgrade head && uv run uvicorn src.main:app --host 0.0.0.0 --port 8000"
-
-  # ── Frontend ─────────────────────────────────────────────────────────────
-  frontend:
-    build:
-      context: ./frontend_tecnicos
-      dockerfile: Dockerfile
-    container_name: radar_frontend
-    ports:
-      - "3000:80"
-    depends_on:
-      - backend
-    networks:
-      - radar_network
 
 volumes:
   pgdata:
-
-networks:
-  radar_network:
-    driver: bridge

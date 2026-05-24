@@ -1,3 +1,4 @@
+
 [project]
 name = "radar-weather-system-v2"
 version = "0.1.0"
@@ -15,7 +16,6 @@ dependencies = [
     "psycopg2-binary>=2.9.12",
     "pydantic-settings>=2.14.1",
     "pyjwt>=2.13.0",
-    "python-multipart>=0.0.29",
     "pytesseract>=0.3.13",
     "rasterio>=1.5.0",
     "scipy>=1.17.1",
@@ -31,3 +31,4 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.14",
 ]
+

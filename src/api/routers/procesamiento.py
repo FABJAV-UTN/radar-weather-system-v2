@@ -1,142 +1,28 @@
+
 # src/api/routers/procesamiento.py
 """
 Router de procesamiento: ejecución del pipeline y consulta de métricas.
 
 Endpoints:
-- POST /procesamiento/url              → Pipeline desde URL DACC (una vez)
-- POST /procesamiento/url/loop/iniciar → Inicia descarga periódica automática
-- POST /procesamiento/url/loop/detener → Detiene la descarga periódica
-- GET  /procesamiento/url/loop/estado  → Estado del loop (activo/inactivo)
-- POST /procesamiento/local            → Pipeline desde un archivo local
-- POST /procesamiento/lote             → Pipeline para todos los GIF de una carpeta
-- POST /procesamiento/lote-upload        → Pipeline subiendo archivos vía multipart
-- GET  /procesamiento/{id}/metricas    → Métricas de una imagen
-- GET  /procesamiento/{id}/pasos       → Pasos del pipeline de una imagen
+- POST /procesamiento/url          → Ejecutar pipeline desde URL DACC
+- POST /procesamiento/local        → Ejecutar pipeline desde archivo local
+- GET  /procesamiento/{id}/metricas → Consultar métricas de una imagen
+- GET  /procesamiento/{id}/pasos   → Consultar pasos del pipeline
 """
 from __future__ import annotations
 
-import asyncio
-import logging
-import shutil
-import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
-from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user, get_db
 from src.api.schemas.imagen import PipelineResponse, ProcesarLocalRequest, ProcesarURLRequest
-from src.config import settings
 from src.db.repository import MetricaProcesamientoRepository, ProcesamentoPasoRepository
 from src.subsistema1.orquestador import ejecutar_pipeline_local, ejecutar_pipeline_url
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 
-
-# ── Estado del loop de descarga periódica ─────────────────────────────────────
-
-class _LoopState:
-    """Singleton que mantiene el estado del loop de descarga periódica."""
-    activo: bool = False
-    tarea: asyncio.Task | None = None
-    ciclos_completados: int = 0
-    ciclos_exitosos: int = 0
-    ultimo_error: str = ""
-    intervalo_minutos: int = 2
-    url: str | None = None
-
-
-_loop_state = _LoopState()
-
-
-async def _loop_descarga(url: str | None, intervalo_minutos: int) -> None:
-    """Tarea de background que descarga y procesa en loop hasta que se detiene."""
-    engine = create_async_engine(settings.database_url, echo=False)
-    AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
-
-    logger.info("Loop de descarga iniciado — intervalo=%d min", intervalo_minutos)
-
-    while _loop_state.activo:
-        _loop_state.ciclos_completados += 1
-        logger.info("Loop ciclo %d — descargando...", _loop_state.ciclos_completados)
-
-        async with AsyncSessionLocal() as session:
-            try:
-                resultado = await ejecutar_pipeline_url(session, url=url)
-                await session.commit()
-                if resultado.exito:
-                    _loop_state.ciclos_exitosos += 1
-                    _loop_state.ultimo_error = ""
-                    logger.info(
-                        "Loop ciclo %d OK — imagen_id=%d, score=%.4f",
-                        _loop_state.ciclos_completados,
-                        resultado.imagen_id,
-                        resultado.metricas.score_match,
-                    )
-                else:
-                    _loop_state.ultimo_error = resultado.mensaje_error
-                    logger.warning("Loop ciclo %d FALLO — %s", _loop_state.ciclos_completados, resultado.mensaje_error)
-            except ValueError as e:
-                await session.rollback()
-                _loop_state.ultimo_error = str(e)
-                logger.info("Loop ciclo %d saltado (duplicado) — %s", _loop_state.ciclos_completados, e)
-            except Exception as e:
-                await session.rollback()
-                _loop_state.ultimo_error = str(e)
-                logger.error("Loop ciclo %d error — %s", _loop_state.ciclos_completados, e)
-
-        # Esperar el intervalo (en chunks de 1s para poder detener rápido)
-        for _ in range(intervalo_minutos * 60):
-            if not _loop_state.activo:
-                break
-            await asyncio.sleep(1)
-
-    await engine.dispose()
-    logger.info("Loop de descarga detenido.")
-
-
-# ── Schemas adicionales ───────────────────────────────────────────────────────
-
-class IniciarLoopRequest(BaseModel):
-    intervalo_minutos: int = Field(default=2, ge=1, le=60, description="Intervalo entre descargas (minutos)")
-    url: str | None = Field(default=None, description="URL alternativa. Si se omite, usa RADAR_URL del .env")
-
-
-class LoopEstadoResponse(BaseModel):
-    activo: bool
-    ciclos_completados: int
-    ciclos_exitosos: int
-    intervalo_minutos: int
-    ultimo_error: str
-    url: str | None
-
-
-class ProcesarLoteRequest(BaseModel):
-    carpeta: str = Field(..., description="Ruta absoluta a la carpeta con archivos GIF/PNG")
-    patron: str = Field(default="*.{gif,png}", description="Patrón glob. Soporta expansión tipo bash: '*.{gif,png}', '*.gif', '*.png'")
-
-class LoteResponse(BaseModel):
-    total: int
-    exitosos: int
-    fallidos: int
-    saltados: int
-    resultados: list[dict]
-
-def _expandir_patron(patron: str) -> list[str]:
-    """
-    Expande patrones tipo bash *.{gif,png} a ['*.gif', '*.png'].
-    Si no tiene llaves, devuelve [patron] tal cual.
-    """
-    import re
-    match = re.match(r'^(.*?)\.\{([^}]+)\}$', patron)
-    if match:
-        prefijo, extensiones = match.groups()
-        return [f"{prefijo}.{ext.strip()}" for ext in extensiones.split(',')]
-    return [patron]
-
-# ── Endpoints: pipeline una sola vez ─────────────────────────────────────────
 
 @router.post("/url", response_model=PipelineResponse, status_code=status.HTTP_202_ACCEPTED)
 async def procesar_desde_url(
@@ -145,9 +31,10 @@ async def procesar_desde_url(
     _user: dict = Depends(get_current_user),
 ) -> PipelineResponse:
     """
-    Descarga la imagen desde la URL DACC y ejecuta el pipeline completo (una sola vez).
+    Descarga la imagen desde la URL DACC y ejecuta el pipeline completo.
 
     Si se omite `url`, usa la URL configurada en `.env` (`RADAR_URL`).
+    Devuelve el ID de la imagen creada y las métricas del pipeline.
     """
     try:
         resultado = await ejecutar_pipeline_url(db, url=request.url)
@@ -186,12 +73,7 @@ async def procesar_desde_local(
     if not file_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Archivo no encontrado: {file_path}",
-        )
-    if file_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"'{file_path}' es una carpeta. Usá /procesamiento/lote para procesar carpetas.",
+            detail=f"Archivo no encontrado en el servidor: {file_path}",
         )
 
     try:
@@ -215,283 +97,6 @@ async def procesar_desde_local(
         tiene_marco=m.tiene_marco,
     )
 
-
-# ── Endpoint: lote (con ruta de carpeta - legacy) ────────────────────────────
-
-@router.post("/lote", response_model=LoteResponse, status_code=status.HTTP_200_OK)
-async def procesar_lote(
-    request: ProcesarLoteRequest,
-    db: AsyncSession = Depends(get_db),
-    _user: dict = Depends(get_current_user),
-) -> LoteResponse:
-    """
-    Procesa todos los archivos GIF/PNG de una carpeta en orden.
-
-    - `carpeta`: ruta absoluta en el servidor (ej: `/home/fabio/Descargas/radar/`)
-    - `patron`: patrón glob. Soporta expansión tipo bash: '*.{gif,png}', '*.gif', '*.png'
-
-    Devuelve un resumen con exitosos, fallidos y saltados (duplicados).
-    """
-    carpeta = Path(request.carpeta)
-    if not carpeta.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Carpeta no encontrada: {carpeta}")
-    if not carpeta.is_dir():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"'{carpeta}' no es una carpeta.")
-
-    # ── Expandir patrones tipo bash *.{gif,png} ─────────────────────────────
-    patrones = _expandir_patron(request.patron)
-
-    archivos = []
-    for patron in patrones:
-        archivos.extend(carpeta.glob(patron))
-
-    archivos = sorted(set(archivos))  # únicos y ordenados
-
-    if not archivos:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No se encontraron archivos con patrón(es) '{request.patron}' en {carpeta}",
-        )
-
-    resultados = []
-    exitosos = 0
-    fallidos = 0
-    saltados = 0
-
-    # Crear engine propio para el lote (sesión por archivo)
-    engine = create_async_engine(settings.database_url, echo=False)
-    AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
-
-    for archivo in archivos:
-        async with AsyncSessionLocal() as session:
-            try:
-                resultado = await ejecutar_pipeline_local(archivo, session)
-                await session.commit()
-                if resultado.exito:
-                    exitosos += 1
-                    resultados.append({
-                        "archivo": archivo.name,
-                        "estado": "ok",
-                        "imagen_id": resultado.imagen_id,
-                        "score_match": resultado.metricas.score_match,
-                        "error": "",
-                    })
-                else:
-                    fallidos += 1
-                    resultados.append({
-                        "archivo": archivo.name,
-                        "estado": "error",
-                        "imagen_id": resultado.imagen_id,
-                        "score_match": 0.0,
-                        "error": resultado.mensaje_error,
-                    })
-            except ValueError as e:
-                await session.rollback()
-                saltados += 1
-                resultados.append({
-                    "archivo": archivo.name,
-                    "estado": "saltado",
-                    "imagen_id": None,
-                    "score_match": 0.0,
-                    "error": str(e),
-                })
-            except Exception as e:
-                await session.rollback()
-                fallidos += 1
-                resultados.append({
-                    "archivo": archivo.name,
-                    "estado": "error",
-                    "imagen_id": None,
-                    "score_match": 0.0,
-                    "error": str(e),
-                })
-
-    await engine.dispose()
-
-    return LoteResponse(
-        total=len(archivos),
-        exitosos=exitosos,
-        fallidos=fallidos,
-        saltados=saltados,
-        resultados=resultados,
-    )
-
-
-# ── Endpoint: lote-upload (sin acceso a filesystem del host) ─────────────────
-
-@router.post("/lote-upload", response_model=LoteResponse, status_code=status.HTTP_200_OK)
-async def procesar_lote_upload(
-    files: list[UploadFile] = File(...),
-    db: AsyncSession = Depends(get_db),
-    _user: dict = Depends(get_current_user),
-) -> LoteResponse:
-    """
-    Procesa archivos GIF/PNG subidos directamente vía multipart/form-data.
-    No requiere acceso al filesystem del host. Los archivos se procesan en /tmp
-    y se eliminan automáticamente.
-    """
-    resultados = []
-    exitosos = 0
-    fallidos = 0
-    saltados = 0
-
-    for uploaded_file in files:
-        suffix = Path(uploaded_file.filename).suffix.lower()
-        if suffix not in {".gif", ".png"}:
-            resultados.append({
-                "archivo": uploaded_file.filename,
-                "estado": "error",
-                "imagen_id": None,
-                "score_match": 0.0,
-                "error": "Formato no soportado. Solo .gif y .png",
-            })
-            fallidos += 1
-            continue
-
-        # Crear archivo temporal en /tmp (dentro del container, no es volumen)
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                delete=False, suffix=suffix, dir="/tmp"
-            ) as tmp:
-                shutil.copyfileobj(uploaded_file.file, tmp)
-                tmp_path = Path(tmp.name)
-
-            resultado = await ejecutar_pipeline_local(tmp_path, db)
-            await db.commit()
-
-            if resultado.exito:
-                exitosos += 1
-                resultados.append({
-                    "archivo": uploaded_file.filename,
-                    "estado": "ok",
-                    "imagen_id": resultado.imagen_id,
-                    "score_match": resultado.metricas.score_match,
-                    "error": "",
-                })
-            else:
-                fallidos += 1
-                resultados.append({
-                    "archivo": uploaded_file.filename,
-                    "estado": "error",
-                    "imagen_id": resultado.imagen_id,
-                    "score_match": 0.0,
-                    "error": resultado.mensaje_error,
-                })
-
-        except ValueError as e:
-            await db.rollback()
-            saltados += 1
-            resultados.append({
-                "archivo": uploaded_file.filename,
-                "estado": "saltado",
-                "imagen_id": None,
-                "score_match": 0.0,
-                "error": str(e),
-            })
-        except Exception as e:
-            await db.rollback()
-            fallidos += 1
-            resultados.append({
-                "archivo": uploaded_file.filename,
-                "estado": "error",
-                "imagen_id": None,
-                "score_match": 0.0,
-                "error": str(e)[:200],
-            })
-        finally:
-            # Limpiar archivo temporal siempre
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
-            await uploaded_file.close()
-
-    return LoteResponse(
-        total=len(files),
-        exitosos=exitosos,
-        fallidos=fallidos,
-        saltados=saltados,
-        resultados=resultados,
-    )
-
-
-# ── Endpoints: loop periódico desde URL ───────────────────────────────────────
-
-@router.post("/url/loop/iniciar", status_code=status.HTTP_200_OK)
-async def iniciar_loop(
-    request: IniciarLoopRequest,
-    background_tasks: BackgroundTasks,
-    _user: dict = Depends(get_current_user),
-) -> dict:
-    """
-    Inicia la descarga periódica automática desde la URL DACC.
-
-    - `intervalo_minutos`: cada cuántos minutos descarga (default: 2, máx: 60)
-    - `url`: URL alternativa (opcional)
-
-    Solo puede haber un loop activo a la vez. Para cambiar parámetros,
-    detené el loop y volvé a iniciarlo.
-    """
-    if _loop_state.activo:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="El loop ya está activo. Detené el loop actual antes de iniciar uno nuevo.",
-        )
-
-    _loop_state.activo = True
-    _loop_state.ciclos_completados = 0
-    _loop_state.ciclos_exitosos = 0
-    _loop_state.ultimo_error = ""
-    _loop_state.intervalo_minutos = request.intervalo_minutos
-    _loop_state.url = request.url
-
-    background_tasks.add_task(_loop_descarga, request.url, request.intervalo_minutos)
-
-    return {
-        "mensaje": f"Loop iniciado. Descargando cada {request.intervalo_minutos} minuto(s).",
-        "url": request.url or settings.radar_url,
-        "intervalo_minutos": request.intervalo_minutos,
-    }
-
-
-@router.post("/url/loop/detener", status_code=status.HTTP_200_OK)
-async def detener_loop(
-    _user: dict = Depends(get_current_user),
-) -> dict:
-    """
-    Detiene la descarga periódica. El ciclo actual termina antes de parar.
-    """
-    if not _loop_state.activo:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="El loop no está activo.",
-        )
-
-    _loop_state.activo = False
-    return {
-        "mensaje": "Loop detenido. El ciclo actual terminará en unos segundos.",
-        "ciclos_completados": _loop_state.ciclos_completados,
-        "ciclos_exitosos": _loop_state.ciclos_exitosos,
-    }
-
-
-@router.get("/url/loop/estado", response_model=LoopEstadoResponse)
-async def estado_loop(
-    _user: dict = Depends(get_current_user),
-) -> LoopEstadoResponse:
-    """
-    Devuelve el estado actual del loop de descarga periódica.
-    """
-    return LoopEstadoResponse(
-        activo=_loop_state.activo,
-        ciclos_completados=_loop_state.ciclos_completados,
-        ciclos_exitosos=_loop_state.ciclos_exitosos,
-        intervalo_minutos=_loop_state.intervalo_minutos,
-        ultimo_error=_loop_state.ultimo_error,
-        url=_loop_state.url,
-    )
-
-
-# ── Endpoints: métricas y pasos ───────────────────────────────────────────────
 
 @router.get("/{imagen_id}/metricas")
 async def obtener_metricas(
