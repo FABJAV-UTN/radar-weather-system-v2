@@ -1,7 +1,7 @@
-
 version: '3.8'
 
 services:
+  # ── Base de datos ──────────────────────────────────────────────────────
   db:
     image: postgis/postgis:16-3.4
     environment:
@@ -17,6 +17,60 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - radar-net
+
+  # ── Backend FastAPI ────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://radar:radar@db:5432/radar_db
+      SECRET_KEY: radar-secret-key-cambiar-en-produccion-32-chars-min
+      TEMPLATE_DIR: /app/templates
+      RADAR_URL: https://www2.contingencias.mendoza.gov.ar/radar/latest.gif
+      CORS_ORIGINS: "http://localhost:3000,http://frontend:3000"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src:ro
+      - ./alembic:/app/alembic:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+      - ./pyproject.toml:/app/pyproject.toml:ro
+      - ./uv.lock:/app/uv.lock:ro
+      - ./templates:/app/templates:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - radar-net
+    command: ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # ── Frontend React (DESARROLLO con hot reload) ──────────────────────────
+  frontend:
+    build:
+      context: ./frontend_tecnicos
+      dockerfile: Dockerfile.dev
+    environment:
+      VITE_API_URL: http://localhost:8000/api/v1
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend_tecnicos/src:/app/src
+      - ./frontend_tecnicos/index.html:/app/index.html
+      - ./frontend_tecnicos/public:/app/public
+      - ./frontend_tecnicos/vite.config.js:/app/vite.config.js
+      - ./frontend_tecnicos/tailwind.config.js:/app/tailwind.config.js   # ← agregar
+      - ./frontend_tecnicos/postcss.config.js:/app/postcss.config.js     # ← agregar
+    depends_on:
+      - backend
+    networks:
+      - radar-net
 
 volumes:
   pgdata:
+
+networks:
+  radar-net:
+    driver: bridge

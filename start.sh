@@ -1,36 +1,61 @@
 #!/bin/bash
-# start.sh — Levantar todo el sistema con Docker
+# start.sh — Levantar todo el stack Radar DACC con Docker Compose
 
-echo "🛰️  Sistema Radar DACC — Iniciando..."
-echo ""
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_NAME="radar-weather"
+
+echo "🌩️  Radar Weather System — Docker Compose"
+echo "============================================"
 
 # Verificar que Docker está corriendo
 if ! docker info > /dev/null 2>&1; then
-    echo "❌ Docker no está corriendo. Inicializalo primero:"
-    echo "   sudo systemctl start docker"
+    echo "❌ Docker no está corriendo. Iniciá Docker primero."
     exit 1
 fi
 
-# Copiar archivos del frontend al proyecto si es necesario
-if [ ! -d "frontend_tecnicos" ]; then
-    echo "⚠️  No se encontró frontend_tecnicos/ en el proyecto"
-    echo "   Copiando desde /mnt/agents/output/frontend_tecnicos..."
-    cp -r /mnt/agents/output/frontend_tecnicos ./frontend_tecnicos 2>/dev/null || {
-        echo "❌ No se pudo copiar. Asegurate de tener los archivos del frontend."
-        exit 1
-    }
+# Verificar que existe el frontend
+if [ ! -d "$SCRIPT_DIR/frontend_tecnicos" ]; then
+    echo "❌ No se encontró frontend_tecnicos/"
+    echo "   Descomprimí el frontend_tecnicos_v2.zip primero:"
+    echo "   unzip frontend_tecnicos_v2.zip -d frontend_tecnicos/"
+    exit 1
 fi
 
-# Levantar todo
-echo "📦 Construyendo imágenes y levantando servicios..."
-docker compose -f docker-compose-full.yml up --build -d
+# Verificar que existe el backend
+if [ ! -d "$SCRIPT_DIR/../radar-weather-system-v2" ] && [ ! -d "$SCRIPT_DIR/radar-weather-system-v2" ]; then
+    echo "⚠️  No se encontró radar-weather-system-v2/ en la ruta esperada"
+    echo "   Asegurate de que el backend esté en ../radar-weather-system-v2"
+fi
 
 echo ""
-echo "✅ Todo listo!"
+echo "📦 Servicios:"
+echo "   🗄️  db        → PostgreSQL + PostGIS  (puerto 5432)"
+echo "   ⚙️  backend   → FastAPI + uv          (puerto 8000)"
+echo "   🎨  frontend  → React + Vite          (puerto 3000)"
 echo ""
-echo "   🌐 Frontend:  http://localhost:3000"
-echo "   ⚙️  API:       http://localhost:8000/docs"
-echo "   🗄️  DB:        localhost:5432"
-echo ""
-echo "📋 Logs: docker compose -f docker-compose-full.yml logs -f"
-echo "🛑 Parar: docker compose -f docker-compose-full.yml down"
+
+# Opciones
+case "${1:-up}" in
+    up)
+        echo "🚀 Levantando servicios..."
+        docker compose -f "$SCRIPT_DIR/docker-compose.full.yml" -p "$PROJECT_NAME" up --build
+        ;;
+    down)
+        echo "🛑 Deteniendo servicios..."
+        docker compose -f "$SCRIPT_DIR/docker-compose.full.yml" -p "$PROJECT_NAME" down
+        ;;
+    logs)
+        echo "📋 Logs..."
+        docker compose -f "$SCRIPT_DIR/docker-compose.full.yml" -p "$PROJECT_NAME" logs -f
+        ;;
+    ps)
+        echo "📊 Estado..."
+        docker compose -f "$SCRIPT_DIR/docker-compose.full.yml" -p "$PROJECT_NAME" ps
+        ;;
+    *)
+        echo "Uso: $0 [up|down|logs|ps]"
+        exit 1
+        ;;
+esac

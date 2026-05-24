@@ -1,0 +1,39 @@
+# Backend: Python 3.12 + uv
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+WORKDIR /app
+
+# Instalar dependencias del sistema que necesitan algunos paquetes Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar archivos de configuración de uv
+COPY pyproject.toml uv.lock ./
+
+# Instalar dependencias con uv (sin crear venv, usa el Python del sistema)
+RUN uv sync --frozen --no-dev
+
+# Copiar código fuente
+COPY src/ ./src/
+COPY alembic/ ./alembic/
+COPY alembic.ini ./
+
+# Variables de entorno
+ENV PYTHONPATH=/app
+ENV DATABASE_URL=postgresql+asyncpg://radar:radar@db:5432/radar_db
+ENV SECRET_KEY=radar-secret-key-cambiar-en-produccion-32-chars-min
+ENV TEMPLATE_DIR=/app/templates
+ENV RADAR_URL=https://www2.contingencias.mendoza.gov.ar/radar/latest.gif
+
+# Puerto
+EXPOSE 8000
+
+# Comando de arranque
+CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
