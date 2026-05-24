@@ -16,6 +16,7 @@ Las métricas de calidad se devuelven al llamador para persistencia.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from dataclasses import dataclass, field
@@ -66,6 +67,11 @@ class ResultadoPipeline:
     mensaje_error: str = ""
 
 
+class PipelineCanceladoError(Exception):
+    """Se lanza cuando el cliente cancela la petición durante el pipeline."""
+    pass
+
+
 def _calcular_metricas(
     clean_rgb: np.ndarray,
     filled_rgb: np.ndarray,
@@ -73,14 +79,6 @@ def _calcular_metricas(
 ) -> dict[str, int | float]:
     """
     Calcula métricas de calidad comparando imagen limpia vs rellenada.
-
-    Args:
-        clean_rgb: Array (H, W, 3) post-limpieza.
-        filled_rgb: Array (H, W, 3) post-relleno.
-        dbz_map: Array (H, W) int32 con valores dBZ (0 = no tormenta).
-
-    Returns:
-        Diccionario con pixeles_originales, limpios, rellenados, perdidos y error_pct.
     """
     originales = int(np.count_nonzero(dbz_map))
     limpios = int(np.count_nonzero(np.any(clean_rgb > 0, axis=2)))
@@ -106,19 +104,19 @@ def _array_to_png_bytes(arr: np.ndarray) -> bytes:
     return buf.read()
 
 
+async def _verificar_cancelacion(request=None):
+    """Verifica si el cliente canceló la petición."""
+    if request is not None and await request.is_disconnected():
+        raise PipelineCanceladoError("El cliente canceló la petición")
+
+
 async def ejecutar_pipeline_local(
     file_path: Path,
     session: AsyncSession,
+    request=None,  # ← NUEVO: para detectar cancelación
 ) -> ResultadoPipeline:
     """
     Ejecuta el pipeline completo para un archivo local (Ruta A).
-
-    Args:
-        file_path: Ruta al archivo PNG o GIF local.
-        session: Sesión async de SQLAlchemy.
-
-    Returns:
-        ResultadoPipeline con el ID de la imagen y las métricas.
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
@@ -126,6 +124,7 @@ async def ejecutar_pipeline_local(
 
     # ── Fase 1: Adquisición ───────────────────────────────────────────────────
     ingesta: IngestaResultado = await ingestar_local(file_path)
+    await _verificar_cancelacion(request)
 
     # Verificar duplicado
     if await img_repo.existe_duplicado(ingesta.fecha_hora, "local"):
@@ -135,6 +134,7 @@ async def ejecutar_pipeline_local(
     imagen = await img_repo.crear(ingesta.fecha_hora, "local", ingesta.raw_bytes)
     imagen_id = imagen.id
     await img_repo.actualizar_estado(imagen_id, "procesando")
+    await _verificar_cancelacion(request)
 
     return await _ejecutar_fases_comunes(
         imagen_id=imagen_id,
@@ -143,22 +143,17 @@ async def ejecutar_pipeline_local(
         img_repo=img_repo,
         paso_repo=paso_repo,
         metrica_repo=metrica_repo,
+        request=request,  # ← NUEVO
     )
 
 
 async def ejecutar_pipeline_url(
     session: AsyncSession,
     url: str | None = None,
+    request=None,  # ← NUEVO: para detectar cancelación
 ) -> ResultadoPipeline:
     """
     Ejecuta el pipeline completo para la descarga desde URL DACC (Ruta B).
-
-    Args:
-        session: Sesión async de SQLAlchemy.
-        url: URL de descarga. Si None, usa settings.radar_url.
-
-    Returns:
-        ResultadoPipeline con el ID de la imagen y las métricas.
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
@@ -175,6 +170,8 @@ async def ejecutar_pipeline_url(
         await intento_repo.registrar(target_url, exitoso=False, motivo_fallo=str(e)[:100])
         raise
 
+    await _verificar_cancelacion(request)
+
     # Verificar duplicado
     if await img_repo.existe_duplicado(ingesta.fecha_hora, "url"):
         logger.warning("Duplicado URL detectado: %s", ingesta.fecha_hora)
@@ -183,6 +180,7 @@ async def ejecutar_pipeline_url(
     imagen = await img_repo.crear(ingesta.fecha_hora, "url", ingesta.raw_bytes)
     imagen_id = imagen.id
     await img_repo.actualizar_estado(imagen_id, "procesando")
+    await _verificar_cancelacion(request)
 
     return await _ejecutar_fases_comunes(
         imagen_id=imagen_id,
@@ -191,6 +189,7 @@ async def ejecutar_pipeline_url(
         img_repo=img_repo,
         paso_repo=paso_repo,
         metrica_repo=metrica_repo,
+        request=request,  # ← NUEVO
     )
 
 
@@ -201,51 +200,48 @@ async def _ejecutar_fases_comunes(
     img_repo: ImagenRadarRepository,
     paso_repo: ProcesamentoPasoRepository,
     metrica_repo: MetricaProcesamientoRepository,
+    request=None,  # ← NUEVO
 ) -> ResultadoPipeline:
     """
     Fases 2-7 comunes a ambas rutas de ingesta.
-
-    Args:
-        imagen_id: ID del registro en base de datos.
-        pil_image: Imagen PIL en memoria.
-        raw_bytes: Bytes crudos originales.
-        img_repo / paso_repo / metrica_repo: Repositorios ya inicializados.
-
-    Returns:
-        ResultadoPipeline con métricas completas.
     """
     metricas = MetricasPipeline()
     cropped_png_bytes: bytes | None = None
 
     try:
         # ── Fase 2: Detección de marco ────────────────────────────────────────
-        tiene_marco = detectar_marco(pil_image)
+        # Usar to_thread para no bloquear el event loop
+        tiene_marco = await asyncio.to_thread(detectar_marco, pil_image)
         metricas.tiene_marco = tiene_marco
         logger.info("[img=%d] Fase 2 — tiene_marco=%s", imagen_id, tiene_marco)
         await paso_repo.registrar(imagen_id, "deteccion_marco")
+        await _verificar_cancelacion(request)
 
         # ── Fase 3: Recorte condicional ───────────────────────────────────────
         if tiene_marco:
-            cropped_arr = crop_imagen(pil_image)
+            cropped_arr = await asyncio.to_thread(crop_imagen, pil_image)
             current_image = Image.fromarray(cropped_arr.astype(np.uint8), mode="RGB")
-            cropped_png_bytes = _array_to_png_bytes(cropped_arr)
+            cropped_png_bytes = await asyncio.to_thread(_array_to_png_bytes, cropped_arr)
             logger.info("[img=%d] Fase 3 — crop aplicado: %s", imagen_id, cropped_arr.shape)
         else:
             current_image = pil_image
             logger.info("[img=%d] Fase 3 — sin marco, crop omitido", imagen_id)
         await paso_repo.registrar(imagen_id, "crop")
+        await _verificar_cancelacion(request)
 
         # ── Fase 4: Limpieza ──────────────────────────────────────────────────
-        clean_rgb, gap_mask, dbz_map = clean_image(current_image)
-        clean_png_bytes = _array_to_png_bytes(clean_rgb)
+        clean_rgb, gap_mask, dbz_map = await asyncio.to_thread(clean_image, current_image)
+        clean_png_bytes = await asyncio.to_thread(_array_to_png_bytes, clean_rgb)
         logger.info("[img=%d] Fase 4 — limpieza ok, storm_pixels=%d", imagen_id, int(np.count_nonzero(dbz_map)))
         await paso_repo.registrar(imagen_id, "limpieza")
+        await _verificar_cancelacion(request)
 
         # ── Fase 5: Relleno ───────────────────────────────────────────────────
-        filled_rgb = fill_gaps(clean_rgb, gap_mask)
-        filled_png_bytes = _array_to_png_bytes(filled_rgb)
+        filled_rgb = await asyncio.to_thread(fill_gaps, clean_rgb, gap_mask)
+        filled_png_bytes = await asyncio.to_thread(_array_to_png_bytes, filled_rgb)
         logger.info("[img=%d] Fase 5 — relleno ok", imagen_id)
         await paso_repo.registrar(imagen_id, "relleno")
+        await _verificar_cancelacion(request)
 
         # ── Calcular métricas de calidad ──────────────────────────────────────
         stats = _calcular_metricas(clean_rgb, filled_rgb, dbz_map)
@@ -256,11 +252,12 @@ async def _ejecutar_fases_comunes(
         metricas.error_relleno_pct = stats["error_relleno_pct"]
 
         # ── Fase 6: Geolocalización ───────────────────────────────────────────
-        geo = geolocalizar(filled_rgb)
+        geo = await asyncio.to_thread(geolocalizar, filled_rgb)
         metricas.geo = geo
         metricas.score_match = geo.score_match
         logger.info("[img=%d] Fase 6 — geo ok, score=%.4f", imagen_id, geo.score_match)
         await paso_repo.registrar(imagen_id, "geolocalizacion")
+        await _verificar_cancelacion(request)
 
         # ── Fase 7: Persistencia ──────────────────────────────────────────────
         await img_repo.actualizar_completado(
@@ -285,6 +282,14 @@ async def _ejecutar_fases_comunes(
         logger.info("[img=%d] Fase 7 — persistido con éxito", imagen_id)
 
         return ResultadoPipeline(imagen_id=imagen_id, metricas=metricas, exito=True)
+
+    except PipelineCanceladoError:
+        logger.warning("[img=%d] Pipeline cancelado por el cliente", imagen_id)
+        await img_repo.marcar_error(imagen_id)
+        await paso_repo.registrar(
+            imagen_id, "limpieza", exitoso=False, mensaje_error="Cancelado por el cliente"
+        )
+        raise  # Re-lanzar para que el router maneje el 499
 
     except Exception as exc:
         logger.exception("[img=%d] Error en pipeline: %s", imagen_id, exc)

@@ -69,3 +69,37 @@ class PipelineResponse(BaseModel):
     error_relleno_pct: float = 0.0
     score_match: float = 0.0
     tiene_marco: bool = False
+
+
+class ProcesarCarpetaRequest(BaseModel):
+    """Request para ejecutar el pipeline en lote desde una carpeta."""
+
+    folder_path: str = Field(
+        ...,
+        description="Ruta absoluta a la carpeta con archivos PNG o GIF.",
+    )
+
+
+class BatchPipelineResponse(BaseModel):
+    """Respuesta del procesamiento en lote de una carpeta."""
+
+    total: int = Field(
+        ...,
+        description="Total de archivos .gif/.png encontrados.",
+    )
+    exitosos: int = Field(
+        ...,
+        description="Cantidad de archivos procesados exitosamente.",
+    )
+    fallidos: int = Field(
+        ...,
+        description="Cantidad de archivos que fallaron.",
+    )
+    resultados: list[dict] = Field(
+        ...,
+        description="Detalle de cada archivo procesado.",
+    )
+    cancelado: bool = Field(
+        False,
+        description="Indica si el procesamiento fue cancelado por el cliente.",
+    )
