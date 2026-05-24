@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Radar, AlertTriangle } from 'lucide-react';
-import { useAuth } from '../hooks/useAuth.js';
+import { useAuth } from '../hooks/useAuth.jsx';
 
 export default function Login() {
   const [username, setUsername] = useState('');

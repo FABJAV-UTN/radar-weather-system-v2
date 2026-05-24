@@ -11,10 +11,14 @@ class ApiError extends Error {
 async function request(endpoint, options = {}) {
   const token = localStorage.getItem('access_token');
 
+  // Detectar si el body es FormData (multipart) — en ese caso NO ponemos Content-Type
+  const isFormData = options.body instanceof FormData;
+
   const config = {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      // Solo Content-Type: application/json si NO es FormData
+      ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     },
@@ -138,11 +142,17 @@ export const api = {
       body: JSON.stringify({ file_path: filePath }),
     }),
 
-  procesarLote: (carpeta, patron = '*.gif') =>
-    request('/procesamiento/lote', {
+  // ── NUEVO: Lote via upload (sin rutas de filesystem) ──
+  procesarLoteUpload: (files) => {
+    const formData = new FormData();
+    files.forEach(file => formData.append('files', file));
+
+    return request('/procesamiento/lote-upload', {
       method: 'POST',
-      body: JSON.stringify({ carpeta, patron }),
-    }),
+      body: formData,
+      // No hace falta headers: {} — request() detecta FormData automáticamente
+    });
+  },
 
   // Loop
   iniciarLoop: (intervalo, url) =>

@@ -1,6 +1,6 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { Radar, LogOut, Images, Settings, User, PlayCircle } from 'lucide-react';
-import { useAuth } from '../hooks/useAuth.js';
+import { useAuth } from '../hooks/useAuth.jsx';
 
 export default function Layout() {
   const { user, logout } = useAuth();

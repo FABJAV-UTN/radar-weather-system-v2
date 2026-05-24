@@ -34,7 +34,7 @@
     @apply bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden;
   }
   .form-input {
-    @apply w-full px-4 py-2.5 border-2 border-gray-200 rounded-md text-sm text-gray-800 bg-white transition-all outline-none focus:border-celeste focus:ring-3 focus:ring-celeste/10;
+    @apply w-full px-4 py-2.5 border-2 border-gray-200 rounded-md text-sm text-gray-800 bg-white transition-all outline-none focus:border-celeste focus:ring-2 focus:ring-celeste/20;
   }
   .form-select {
     @apply w-full px-4 py-2.5 border-2 border-gray-200 rounded-md text-sm text-gray-800 bg-white outline-none cursor-pointer focus:border-celeste;

@@ -9,6 +9,7 @@ Endpoints:
 - GET  /procesamiento/url/loop/estado  → Estado del loop (activo/inactivo)
 - POST /procesamiento/local            → Pipeline desde un archivo local
 - POST /procesamiento/lote             → Pipeline para todos los GIF de una carpeta
+- POST /procesamiento/lote-upload        → Pipeline subiendo archivos vía multipart
 - GET  /procesamiento/{id}/metricas    → Métricas de una imagen
 - GET  /procesamiento/{id}/pasos       → Pasos del pipeline de una imagen
 """
@@ -16,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -112,8 +115,7 @@ class LoopEstadoResponse(BaseModel):
 
 class ProcesarLoteRequest(BaseModel):
     carpeta: str = Field(..., description="Ruta absoluta a la carpeta con archivos GIF/PNG")
-    patron: str = Field(default="*.gif", description="Patrón glob (ej: '*.gif', '*.png', '*.gif *.png')")
-
+    patron: str = Field(default="*.{gif,png}", description="Patrón glob. Soporta expansión tipo bash: '*.{gif,png}', '*.gif', '*.png'")
 
 class LoteResponse(BaseModel):
     total: int
@@ -122,6 +124,17 @@ class LoteResponse(BaseModel):
     saltados: int
     resultados: list[dict]
 
+def _expandir_patron(patron: str) -> list[str]:
+    """
+    Expande patrones tipo bash *.{gif,png} a ['*.gif', '*.png'].
+    Si no tiene llaves, devuelve [patron] tal cual.
+    """
+    import re
+    match = re.match(r'^(.*?)\.\{([^}]+)\}$', patron)
+    if match:
+        prefijo, extensiones = match.groups()
+        return [f"{prefijo}.{ext.strip()}" for ext in extensiones.split(',')]
+    return [patron]
 
 # ── Endpoints: pipeline una sola vez ─────────────────────────────────────────
 
@@ -203,7 +216,7 @@ async def procesar_desde_local(
     )
 
 
-# ── Endpoint: lote ────────────────────────────────────────────────────────────
+# ── Endpoint: lote (con ruta de carpeta - legacy) ────────────────────────────
 
 @router.post("/lote", response_model=LoteResponse, status_code=status.HTTP_200_OK)
 async def procesar_lote(
@@ -215,7 +228,7 @@ async def procesar_lote(
     Procesa todos los archivos GIF/PNG de una carpeta en orden.
 
     - `carpeta`: ruta absoluta en el servidor (ej: `/home/fabio/Descargas/radar/`)
-    - `patron`: patrón glob, por defecto `*.gif`
+    - `patron`: patrón glob. Soporta expansión tipo bash: '*.{gif,png}', '*.gif', '*.png'
 
     Devuelve un resumen con exitosos, fallidos y saltados (duplicados).
     """
@@ -225,11 +238,19 @@ async def procesar_lote(
     if not carpeta.is_dir():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"'{carpeta}' no es una carpeta.")
 
-    archivos = sorted(carpeta.glob(request.patron))
+    # ── Expandir patrones tipo bash *.{gif,png} ─────────────────────────────
+    patrones = _expandir_patron(request.patron)
+
+    archivos = []
+    for patron in patrones:
+        archivos.extend(carpeta.glob(patron))
+
+    archivos = sorted(set(archivos))  # únicos y ordenados
+
     if not archivos:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No se encontraron archivos con patrón '{request.patron}' en {carpeta}",
+            detail=f"No se encontraron archivos con patrón(es) '{request.patron}' en {carpeta}",
         )
 
     resultados = []
@@ -289,6 +310,103 @@ async def procesar_lote(
 
     return LoteResponse(
         total=len(archivos),
+        exitosos=exitosos,
+        fallidos=fallidos,
+        saltados=saltados,
+        resultados=resultados,
+    )
+
+
+# ── Endpoint: lote-upload (sin acceso a filesystem del host) ─────────────────
+
+@router.post("/lote-upload", response_model=LoteResponse, status_code=status.HTTP_200_OK)
+async def procesar_lote_upload(
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+) -> LoteResponse:
+    """
+    Procesa archivos GIF/PNG subidos directamente vía multipart/form-data.
+    No requiere acceso al filesystem del host. Los archivos se procesan en /tmp
+    y se eliminan automáticamente.
+    """
+    resultados = []
+    exitosos = 0
+    fallidos = 0
+    saltados = 0
+
+    for uploaded_file in files:
+        suffix = Path(uploaded_file.filename).suffix.lower()
+        if suffix not in {".gif", ".png"}:
+            resultados.append({
+                "archivo": uploaded_file.filename,
+                "estado": "error",
+                "imagen_id": None,
+                "score_match": 0.0,
+                "error": "Formato no soportado. Solo .gif y .png",
+            })
+            fallidos += 1
+            continue
+
+        # Crear archivo temporal en /tmp (dentro del container, no es volumen)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                delete=False, suffix=suffix, dir="/tmp"
+            ) as tmp:
+                shutil.copyfileobj(uploaded_file.file, tmp)
+                tmp_path = Path(tmp.name)
+
+            resultado = await ejecutar_pipeline_local(tmp_path, db)
+            await db.commit()
+
+            if resultado.exito:
+                exitosos += 1
+                resultados.append({
+                    "archivo": uploaded_file.filename,
+                    "estado": "ok",
+                    "imagen_id": resultado.imagen_id,
+                    "score_match": resultado.metricas.score_match,
+                    "error": "",
+                })
+            else:
+                fallidos += 1
+                resultados.append({
+                    "archivo": uploaded_file.filename,
+                    "estado": "error",
+                    "imagen_id": resultado.imagen_id,
+                    "score_match": 0.0,
+                    "error": resultado.mensaje_error,
+                })
+
+        except ValueError as e:
+            await db.rollback()
+            saltados += 1
+            resultados.append({
+                "archivo": uploaded_file.filename,
+                "estado": "saltado",
+                "imagen_id": None,
+                "score_match": 0.0,
+                "error": str(e),
+            })
+        except Exception as e:
+            await db.rollback()
+            fallidos += 1
+            resultados.append({
+                "archivo": uploaded_file.filename,
+                "estado": "error",
+                "imagen_id": None,
+                "score_match": 0.0,
+                "error": str(e)[:200],
+            })
+        finally:
+            # Limpiar archivo temporal siempre
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            await uploaded_file.close()
+
+    return LoteResponse(
+        total=len(files),
         exitosos=exitosos,
         fallidos=fallidos,
         saltados=saltados,

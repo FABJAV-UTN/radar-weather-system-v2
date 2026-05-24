@@ -1,9 +1,10 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { AuthProvider, useAuth } from './hooks/useAuth.js';
+import { AuthProvider, useAuth } from './hooks/useAuth.jsx';
 import Layout from './components/Layout.jsx';
 import Login from './pages/Login.jsx';
 import Imagenes from './pages/Imagenes.jsx';
 import Procesamiento from './pages/Procesamiento.jsx';
+import ProcesamientoLote from './pages/ProcesamientoLote.jsx';
 import Perfil from './pages/Perfil.jsx';
 import Configuracion from './pages/Configuracion.jsx';
 
@@ -59,6 +60,7 @@ function AppRoutes() {
       }>
         <Route index element={<Imagenes />} />
         <Route path="procesamiento" element={<Procesamiento />} />
+        <Route path="procesamiento/lote" element={<ProcesamientoLote />} />
         <Route path="perfil" element={<Perfil />} />
         <Route path="configuracion" element={<Configuracion />} />
       </Route>

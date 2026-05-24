@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Play, Square, Download, FolderOpen, FileText, Globe,
-  RefreshCw, CheckCircle, XCircle, SkipForward, AlertCircle,
+  RefreshCw, CheckCircle, XCircle, AlertCircle,
   Clock, Activity
 } from 'lucide-react';
 import { api } from '../services/api.js';
@@ -25,13 +26,6 @@ export default function Procesamiento() {
   const [urlLoading, setUrlLoading] = useState(false);
   const [urlResult, setUrlResult] = useState(null);
   const [urlError, setUrlError] = useState('');
-
-  // ── Lote ─────────────────────────────────────────────────────────────────
-  const [carpeta, setCarpeta] = useState('');
-  const [patron, setPatron] = useState('*.gif');
-  const [loteLoading, setLoteLoading] = useState(false);
-  const [loteResult, setLoteResult] = useState(null);
-  const [loteError, setLoteError] = useState('');
 
   // ── Local ──────────────────────────────────────────────────────────────────
   const [archivoLocal, setArchivoLocal] = useState('');
@@ -91,21 +85,6 @@ export default function Procesamiento() {
       setUrlError(err.message);
     } finally {
       setUrlLoading(false);
-    }
-  }
-
-  async function procesarLote(e) {
-    e.preventDefault();
-    setLoteLoading(true);
-    setLoteResult(null);
-    setLoteError('');
-    try {
-      const data = await api.procesarLote(carpeta, patron);
-      setLoteResult(data);
-    } catch (err) {
-      setLoteError(err.message);
-    } finally {
-      setLoteLoading(false);
     }
   }
 
@@ -291,7 +270,7 @@ export default function Procesamiento() {
         </div>
       </div>
 
-      {/* ── LOTE ───────────────────────────────────────────────────────────── */}
+      {/* ── LOTE (nuevo: link a drag & drop) ───────────────────────────────── */}
       <div className="card">
         <div className="px-6 py-4" style={{ background: 'linear-gradient(135deg, #003366, #004a99)' }}>
           <h2 className="font-display text-base font-bold text-white uppercase tracking-wide flex items-center gap-2">
@@ -300,94 +279,22 @@ export default function Procesamiento() {
           </h2>
         </div>
         <div className="p-6">
-          <form onSubmit={procesarLote} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                  Ruta de la carpeta (absoluta)
-                </label>
-                <input
-                  type="text"
-                  value={carpeta}
-                  onChange={e => setCarpeta(e.target.value)}
-                  placeholder="/home/usuario/radar/imagenes"
-                  required
-                  className="form-input"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                  Patrón de archivos
-                </label>
-                <select value={patron} onChange={e => setPatron(e.target.value)} className="form-select">
-                  <option value="*.gif">*.gif</option>
-                  <option value="*.png">*.png</option>
-                  <option value="*.GIF">*.GIF (mayúsculas)</option>
-                </select>
-              </div>
-            </div>
-
-            {loteError && (
-              <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-600">
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                {loteError}
-              </div>
-            )}
-
-            {loteResult && (
-              <div className="space-y-3">
-                <div className={`flex items-start gap-2 rounded-lg px-4 py-3 text-sm ${
-                  loteResult.fallidos === 0
-                    ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-                    : 'bg-amber-50 border border-amber-200 text-amber-700'
-                }`}>
-                  <Activity className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  <div className="flex gap-4 flex-wrap">
-                    <span>Total: <strong>{loteResult.total}</strong></span>
-                    <span className="text-emerald-600">✓ Exitosos: <strong>{loteResult.exitosos}</strong></span>
-                    <span className="text-red-500">✗ Fallidos: <strong>{loteResult.fallidos}</strong></span>
-                    <span className="text-gray-500">⊘ Saltados: <strong>{loteResult.saltados}</strong></span>
-                  </div>
-                </div>
-
-                {loteResult.total > 0 && (
-                  <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all duration-500"
-                      style={{
-                        width: `${(loteResult.exitosos / loteResult.total) * 100}%`,
-                        background: 'linear-gradient(90deg, #0099dd, #0066cc)'
-                      }}
-                    />
-                  </div>
-                )}
-
-                {loteResult.resultados?.filter(r => r.estado !== 'ok').length > 0 && (
-                  <details className="group">
-                    <summary className="cursor-pointer text-sm text-gray-500 font-semibold flex items-center gap-1 hover:text-gray-700">
-                      <AlertCircle className="w-4 h-4" />
-                      Ver archivos con problemas ({loteResult.resultados.filter(r => r.estado !== 'ok').length})
-                    </summary>
-                    <div className="mt-3 max-h-52 overflow-y-auto space-y-1.5">
-                      {loteResult.resultados.filter(r => r.estado !== 'ok').map((r, i) => (
-                        <div key={i} className="text-xs px-3 py-2 border-l-3 border-red-400 bg-red-50/50 text-gray-600 rounded-r">
-                          <strong className="text-gray-800">{r.archivo}</strong>: {r.error}
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
-              </div>
-            )}
-
-            <button type="submit" disabled={loteLoading || !carpeta} className="btn btn-primary">
-              {loteLoading ? (
-                <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Procesando lote...</>
-              ) : (
-                <><Play className="w-4 h-4" /> Iniciar procesamiento por lote</>
-              )}
-            </button>
-          </form>
+          <div className="bg-celeste-light border border-celeste/30 rounded-lg p-6 text-center">
+            <div className="text-4xl mb-3">📁</div>
+            <p className="text-gray-700 font-semibold mb-2">
+              Procesá archivos GIF/PNG arrastrándolos directamente
+            </p>
+            <p className="text-sm text-gray-500 mb-4">
+              Sin necesidad de rutas de carpeta. Seguro y portable.
+            </p>
+            <Link
+              to="/procesamiento/lote"
+              className="btn btn-primary inline-flex"
+            >
+              <FolderOpen className="w-4 h-4" />
+              Ir a Procesar Lotes (Drag & Drop)
+            </Link>
+          </div>
         </div>
       </div>
 
