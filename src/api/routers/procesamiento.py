@@ -5,16 +5,19 @@ Router de procesamiento: ejecución del pipeline y consulta de métricas.
 Endpoints:
 - POST /procesamiento/url          → Ejecutar pipeline desde URL DACC
 - POST /procesamiento/local        → Ejecutar pipeline desde archivo local
-- POST /procesamiento/carpeta      → Procesar lote de archivos en carpeta
+- POST /procesamiento/carpeta      → Procesar lote de archivos en carpeta (ruta servidor)
+- POST /procesamiento/upload-lote  → Procesar lote via upload desde el cliente
 - GET  /procesamiento/{id}/metricas → Consultar métricas de una imagen
 - GET  /procesamiento/{id}/pasos   → Consultar pasos del pipeline
 """
 from __future__ import annotations
 
 import asyncio
+import shutil
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user, get_db
@@ -28,9 +31,9 @@ from src.api.schemas.imagen import (
 from src.db.connection import AsyncSessionLocal
 from src.db.repository import MetricaProcesamientoRepository, ProcesamentoPasoRepository
 from src.subsistema1.orquestador import (
+    PipelineCanceladoError,
     ejecutar_pipeline_local,
     ejecutar_pipeline_url,
-    PipelineCanceladoError,
 )
 
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
@@ -39,7 +42,7 @@ router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 @router.post("/url", response_model=PipelineResponse, status_code=status.HTTP_202_ACCEPTED)
 async def procesar_desde_url(
     request: ProcesarURLRequest,
-    http_request: Request,  # ← NUEVO: para detectar cancelación
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> PipelineResponse:
@@ -82,7 +85,7 @@ async def procesar_desde_url(
 @router.post("/local", response_model=PipelineResponse, status_code=status.HTTP_202_ACCEPTED)
 async def procesar_desde_local(
     request: ProcesarLocalRequest,
-    http_request: Request,  # ← NUEVO: para detectar cancelación
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> PipelineResponse:
@@ -135,7 +138,7 @@ async def procesar_carpeta(
     _user: dict = Depends(get_current_user),
 ) -> BatchPipelineResponse:
     """
-    Procesa todos los archivos .gif y .png de una carpeta secuencialmente.
+    Procesa todos los archivos .gif y .png de una carpeta del servidor secuencialmente.
 
     Cada archivo usa su propia sesión de DB independiente.
     Soporta cancelación: si el cliente se desconecta, devuelve resumen parcial.
@@ -163,7 +166,6 @@ async def procesar_carpeta(
     cancelado = False
 
     for archivo in archivos:
-        # Ceder el event loop para detectar desconexión del cliente
         await asyncio.sleep(0)
 
         if await http_request.is_disconnected():
@@ -200,7 +202,7 @@ async def procesar_carpeta(
                     "exito": False,
                     "mensaje_error": "Cancelado por el cliente",
                 })
-                break  # ← Salir del loop inmediatamente
+                break
 
             except ValueError as e:
                 await file_db.rollback()
@@ -229,6 +231,93 @@ async def procesar_carpeta(
         resultados=resultados,
         cancelado=cancelado,
     )
+
+
+@router.post("/upload-lote", response_model=BatchPipelineResponse, status_code=status.HTTP_200_OK)
+async def procesar_upload_lote(
+    http_request: Request,
+    archivos: list[UploadFile] = File(...),
+    _user: dict = Depends(get_current_user),
+) -> BatchPipelineResponse:
+    """
+    Recibe archivos .gif/.png desde el cliente (upload), los guarda en /tmp/,
+    los procesa secuencialmente con el pipeline completo y limpia los temporales al finalizar.
+
+    Soporta cancelación: si el cliente se desconecta, devuelve resumen parcial.
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="radar_lote_")
+    try:
+        # Guardar archivos subidos en directorio temporal
+        paths = []
+        for archivo in archivos:
+            if not (archivo.filename.endswith(".gif") or archivo.filename.endswith(".png")):
+                continue
+            dest = Path(tmp_dir) / Path(archivo.filename).name
+            with dest.open("wb") as f:
+                shutil.copyfileobj(archivo.file, f)
+            paths.append(dest)
+
+        paths = sorted(paths)
+        exitosos = 0
+        fallidos = 0
+        resultados = []
+        cancelado = False
+
+        for path in paths:
+            await asyncio.sleep(0)
+
+            if await http_request.is_disconnected():
+                cancelado = True
+                break
+
+            async with AsyncSessionLocal() as file_db:
+                try:
+                    resultado = await ejecutar_pipeline_local(path, file_db, request=http_request)
+                    await file_db.commit()
+                    exitosos += 1
+                    m = resultado.metricas
+                    resultados.append({
+                        "archivo": path.name,
+                        "imagen_id": resultado.imagen_id,
+                        "exito": True,
+                        "pixeles_originales": m.pixeles_originales,
+                        "pixeles_limpios": m.pixeles_limpios,
+                        "pixeles_rellenados": m.pixeles_rellenados,
+                        "pixeles_perdidos": m.pixeles_perdidos,
+                        "error_relleno_pct": float(m.error_relleno_pct),
+                        "score_match": float(m.score_match),
+                        "tiene_marco": m.tiene_marco,
+                        "mensaje_error": "",
+                    })
+                except PipelineCanceladoError:
+                    await file_db.rollback()
+                    cancelado = True
+                    resultados.append({
+                        "archivo": path.name,
+                        "imagen_id": None,
+                        "exito": False,
+                        "mensaje_error": "Cancelado por el cliente",
+                    })
+                    break
+                except Exception as e:
+                    await file_db.rollback()
+                    fallidos += 1
+                    resultados.append({
+                        "archivo": path.name,
+                        "imagen_id": None,
+                        "exito": False,
+                        "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}",
+                    })
+
+        return BatchPipelineResponse(
+            total=len(paths),
+            exitosos=exitosos,
+            fallidos=fallidos,
+            resultados=resultados,
+            cancelado=cancelado,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @router.get("/{imagen_id}/metricas")

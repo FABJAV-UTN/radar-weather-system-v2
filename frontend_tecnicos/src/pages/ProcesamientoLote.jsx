@@ -1,34 +1,46 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { api, cancelRequest } from '../services/api';
 
 export function ProcesamientoLote() {
-  const [folderPath, setFolderPath] = useState('');
+  const [archivos, setArchivos] = useState([]);
   const [resultado, setResultado] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState(null);
-  const [progreso, setProgreso] = useState({ actual: 0, total: 0 });
+  const inputRef = useRef(null);
+
+  const handleSeleccion = (e) => {
+    const files = Array.from(e.target.files).filter(
+      f => f.name.endsWith('.gif') || f.name.endsWith('.png')
+    );
+    setArchivos(files);
+    setResultado(null);
+    setError('');
+    // Resetear el input para que se pueda volver a seleccionar la misma carpeta
+    e.target.value = '';
+  };
+
+  const abrirSelectorArchivos = () => {
+    inputRef.current.removeAttribute('webkitdirectory');
+    inputRef.current.click();
+  };
+
+  const abrirSelectorCarpeta = () => {
+    inputRef.current.setAttribute('webkitdirectory', '');
+    inputRef.current.click();
+  };
 
   const handleProcesar = async () => {
-    if (!folderPath) return;
+    if (!archivos.length) return;
     setError('');
     setResultado(null);
     setLoading(true);
-    setProgreso({ actual: 0, total: 0 });
 
     try {
-      const promise = api.procesarCarpeta(folderPath);
+      const promise = api.procesarUploadLote(archivos);
       setCurrentRequestId(promise._id);
-
-      // Simular progreso visual (el backend no envía progreso en tiempo real aún)
-      const progressInterval = setInterval(() => {
-        setProgreso(p => ({ ...p, actual: p.actual + 1 }));
-      }, 800);
-
       const data = await promise;
-      clearInterval(progressInterval);
       setResultado(data);
-      setProgreso({ actual: data.exitosos + data.fallidos, total: data.total });
     } catch (err) {
       if (err.name === 'AbortError' || err.message?.includes('abort')) {
         setError('Procesamiento cancelado por el usuario');
@@ -42,9 +54,13 @@ export function ProcesamientoLote() {
   };
 
   const handleCancelar = () => {
-    if (currentRequestId) {
-      cancelRequest(currentRequestId);
-    }
+    if (currentRequestId) cancelRequest(currentRequestId);
+  };
+
+  const limpiarSeleccion = () => {
+    setArchivos([]);
+    setResultado(null);
+    setError('');
   };
 
   return (
@@ -53,38 +69,84 @@ export function ProcesamientoLote() {
         <h3 className="font-display text-lg font-bold text-gray-800 mb-4">
           📁 Procesamiento por Lote
         </h3>
-        <p className="text-sm text-gray-500 mb-4">
-          Procesa todos los archivos <code>.gif</code> y <code>.png</code> de una carpeta secuencialmente.
-          Cada archivo usa su propia sesión de base de datos.
+        <p className="text-sm text-gray-500 mb-6">
+          Seleccioná archivos <code className="bg-gray-100 px-1 rounded">.gif</code> o{' '}
+          <code className="bg-gray-100 px-1 rounded">.png</code> desde tu computadora.
+          Se suben al servidor y se procesan secuencialmente.
         </p>
 
+        {/* Input oculto */}
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept=".gif,.png"
+          onChange={handleSeleccion}
+          className="hidden"
+        />
+
         <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Ruta de la carpeta
-            </label>
-            <input
-              type="text"
-              value={folderPath}
-              onChange={(e) => setFolderPath(e.target.value)}
-              className="form-input"
-              placeholder="/home/fabio/Descargas/compartir-Fabio"
-            />
+          {/* Botones de selección */}
+          <div className="flex gap-3">
+            <button
+              onClick={abrirSelectorArchivos}
+              disabled={loading}
+              className="btn btn-outline"
+            >
+              🗂️ Seleccionar archivos
+            </button>
+            <button
+              onClick={abrirSelectorCarpeta}
+              disabled={loading}
+              className="btn btn-outline"
+            >
+              📁 Seleccionar carpeta
+            </button>
+            {archivos.length > 0 && !loading && (
+              <button
+                onClick={limpiarSeleccion}
+                className="btn btn-outline text-gray-400 hover:text-red-500"
+              >
+                ✕ Limpiar
+              </button>
+            )}
           </div>
 
+          {/* Archivos seleccionados */}
+          {archivos.length > 0 && (
+            <div className="bg-celeste-light border border-celeste/20 rounded-lg p-4">
+              <p className="text-sm font-medium text-celeste mb-2">
+                ✅ {archivos.length} archivo{archivos.length !== 1 ? 's' : ''} seleccionado{archivos.length !== 1 ? 's' : ''}
+              </p>
+              {archivos.length <= 10 && (
+                <ul className="text-xs text-gray-500 space-y-0.5 max-h-32 overflow-auto">
+                  {archivos.map((f, i) => (
+                    <li key={i} className="font-mono">{f.name}</li>
+                  ))}
+                </ul>
+              )}
+              {archivos.length > 10 && (
+                <p className="text-xs text-gray-400 mt-1">
+                  {archivos.slice(0, 5).map(f => f.name).join(', ')} ... y {archivos.length - 5} más
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Botones de acción */}
           <div className="flex gap-3">
             <button
               onClick={handleProcesar}
-              disabled={loading || !folderPath}
+              disabled={loading || !archivos.length}
               className="btn btn-primary"
             >
               {loading ? (
                 <>
-                  <span className="animate-spin">⏳</span>
+                  <span className="animate-spin inline-block">⏳</span>
                   Procesando lote...
                 </>
               ) : (
-                <>▶️ Procesar Carpeta</>
+                <>▶️ Procesar {archivos.length > 0 ? `(${archivos.length})` : ''}</>
               )}
             </button>
 
@@ -93,33 +155,18 @@ export function ProcesamientoLote() {
                 onClick={handleCancelar}
                 className="btn btn-danger animate-pulse"
               >
-                🛑 Cancelar Lote
+                🛑 Cancelar
               </button>
             )}
           </div>
+
+          {loading && (
+            <p className="text-xs text-gray-400">
+              Los archivos ya procesados quedan guardados aunque canceles.
+            </p>
+          )}
         </div>
       </div>
-
-      {/* Barra de progreso */}
-      {loading && (
-        <div className="card p-6">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-medium text-gray-700">Progreso</span>
-            <span className="text-sm text-gray-500">
-              ~{progreso.actual} archivos procesados
-            </span>
-          </div>
-          <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
-            <div
-              className="bg-celeste h-full rounded-full transition-all duration-500"
-              style={{ width: `${Math.min((progreso.actual / Math.max(progreso.total, 1)) * 100, 100)}%` }}
-            />
-          </div>
-          <p className="text-xs text-gray-400 mt-2">
-            Presioná "Cancelar" para detener el procesamiento. Los archivos ya procesados quedan guardados.
-          </p>
-        </div>
-      )}
 
       {/* Resultado */}
       {resultado && (
@@ -148,23 +195,27 @@ export function ProcesamientoLote() {
               <table className="w-full text-sm">
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
-                    <th className="px-4 py-2 text-left">Archivo</th>
-                    <th className="px-4 py-2 text-left">Estado</th>
-                    <th className="px-4 py-2 text-left">ID</th>
-                    <th className="px-4 py-2 text-left">Mensaje</th>
+                    <th className="px-4 py-2 text-left font-semibold text-gray-600">Archivo</th>
+                    <th className="px-4 py-2 text-left font-semibold text-gray-600">Estado</th>
+                    <th className="px-4 py-2 text-left font-semibold text-gray-600">ID</th>
+                    <th className="px-4 py-2 text-left font-semibold text-gray-600">Score</th>
+                    <th className="px-4 py-2 text-left font-semibold text-gray-600">Mensaje</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {resultado.resultados.map((r, i) => (
                     <tr key={i} className={r.exito ? '' : 'bg-red-50/30'}>
-                      <td className="px-4 py-2 font-mono text-xs">{r.archivo}</td>
+                      <td className="px-4 py-2 font-mono text-xs text-gray-600">{r.archivo}</td>
                       <td className="px-4 py-2">
                         <span className={`badge ${r.exito ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-                          {r.exito ? '✓' : '✗'}
+                          {r.exito ? '✓ OK' : '✗ Error'}
                         </span>
                       </td>
                       <td className="px-4 py-2 font-mono text-xs">
                         {r.imagen_id ? `#${r.imagen_id}` : '—'}
+                      </td>
+                      <td className="px-4 py-2 font-mono text-xs">
+                        {r.score_match != null ? `${(r.score_match * 100).toFixed(1)}%` : '—'}
                       </td>
                       <td className="px-4 py-2 text-xs text-gray-500">
                         {r.mensaje_error || 'OK'}
@@ -178,9 +229,10 @@ export function ProcesamientoLote() {
         </div>
       )}
 
+      {/* Error */}
       {error && !resultado && (
         <div className="card p-6 border-red-200 bg-red-50">
-          <p className="text-red-600">{error}</p>
+          <p className="text-red-600 text-sm">{error}</p>
         </div>
       )}
     </div>

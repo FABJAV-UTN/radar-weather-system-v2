@@ -18,7 +18,7 @@ function makeRequest(endpoint, options = {}, signal = null) {
 
   const config = {
     ...options,
-    signal, // ← AbortController signal
+    signal,
     headers: {
       ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -119,10 +119,12 @@ function createController() {
   const id = ++controllerId;
   const ctrl = new AbortController();
   activeControllers.set(id, ctrl);
-  return { id, signal: ctrl.signal, abort: () => {
-    ctrl.abort();
-    activeControllers.delete(id);
-  }};
+  return {
+    id, signal: ctrl.signal, abort: () => {
+      ctrl.abort();
+      activeControllers.delete(id);
+    }
+  };
 }
 
 // ── API Export ────────────────────────────────────────────────────────────
@@ -192,6 +194,22 @@ export const api = {
     const promise = request('/procesamiento/carpeta', {
       method: 'POST',
       body: JSON.stringify({ folder_path: folderPath }),
+    }, signal);
+    promise._cancel = abort;
+    promise._id = id;
+    return promise;
+  },
+
+  // Procesamiento lote via upload — sube los archivos desde el cliente
+  procesarUploadLote: (archivos) => {
+    const { id, signal, abort } = createController();
+    const formData = new FormData();
+    for (const archivo of archivos) {
+      formData.append('archivos', archivo);
+    }
+    const promise = request('/procesamiento/upload-lote', {
+      method: 'POST',
+      body: formData,
     }, signal);
     promise._cancel = abort;
     promise._id = id;
