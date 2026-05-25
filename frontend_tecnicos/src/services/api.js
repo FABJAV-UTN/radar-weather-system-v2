@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api/v1';
+const API_BASE = import.meta.env.VITE_API_URL || '/api/v1';
 
 class ApiError extends Error {
   constructor(message, status, data) {
@@ -100,10 +100,7 @@ export function logout() {
 // ── Cancelación ─────────────────────────────────────────────────────────────
 
 export function cancelAllRequests() {
-  activeControllers.forEach((ctrl, id) => {
-    ctrl.abort();
-    console.log(`🛑 Cancelado: ${id}`);
-  });
+  activeControllers.forEach((ctrl) => ctrl.abort());
   activeControllers.clear();
 }
 
@@ -132,10 +129,7 @@ function createController() {
 export const api = {
   // Auth
   login: (username, password) =>
-    request('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    }),
+    request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
 
   me: () => request('/auth/me'),
 
@@ -151,22 +145,28 @@ export const api = {
 
   obtenerImagen: (id) => request(`/imagenes/${id}`),
 
+  // ✅ FIX: usa API_BASE relativa para que pase por el proxy de Vite/nginx
   descargarGeotiff: async (id, filename) => {
     const token = localStorage.getItem('access_token');
     const response = await fetch(`${API_BASE}/imagenes/${id}/geotiff`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
-    if (!response.ok) throw new ApiError('Error al descargar', response.status);
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new ApiError(data.detail || `Error ${response.status}`, response.status);
+    }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename || `radar_${id}.tif`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   },
 
-  // Procesamiento — CON CANCELACIÓN
+  // Procesamiento único
   procesarUrl: (url) => {
     const { id, signal, abort } = createController();
     const promise = request('/procesamiento/url', {
@@ -200,7 +200,7 @@ export const api = {
     return promise;
   },
 
-  // Procesamiento lote via upload — sube los archivos desde el cliente
+  // Procesamiento lote via upload
   procesarUploadLote: (archivos) => {
     const { id, signal, abort } = createController();
     const formData = new FormData();
@@ -215,6 +215,19 @@ export const api = {
     promise._id = id;
     return promise;
   },
+
+  // Scheduler — procesamiento continuo
+  schedulerStart: (url = null, intervalo_segundos = 120) =>
+    request('/procesamiento/scheduler/start', {
+      method: 'POST',
+      body: JSON.stringify({ url, intervalo_segundos }),
+    }),
+
+  schedulerStop: () =>
+    request('/procesamiento/scheduler/stop', { method: 'POST' }),
+
+  schedulerEstado: () =>
+    request('/procesamiento/scheduler/estado'),
 
   // Métricas
   obtenerMetricas: (imagenId) => request(`/procesamiento/${imagenId}/metricas`),

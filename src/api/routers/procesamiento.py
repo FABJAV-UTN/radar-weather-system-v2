@@ -3,12 +3,15 @@
 Router de procesamiento: ejecución del pipeline y consulta de métricas.
 
 Endpoints:
-- POST /procesamiento/url          → Ejecutar pipeline desde URL DACC
-- POST /procesamiento/local        → Ejecutar pipeline desde archivo local
-- POST /procesamiento/carpeta      → Procesar lote de archivos en carpeta (ruta servidor)
-- POST /procesamiento/upload-lote  → Procesar lote via upload desde el cliente
-- GET  /procesamiento/{id}/metricas → Consultar métricas de una imagen
-- GET  /procesamiento/{id}/pasos   → Consultar pasos del pipeline
+- POST /procesamiento/url              → Ejecutar pipeline una vez desde URL DACC
+- POST /procesamiento/local            → Ejecutar pipeline desde archivo local
+- POST /procesamiento/carpeta          → Procesar lote desde carpeta del servidor
+- POST /procesamiento/upload-lote      → Procesar lote via upload desde el cliente
+- POST /procesamiento/scheduler/start  → Iniciar procesamiento continuo desde URL
+- POST /procesamiento/scheduler/stop   → Detener procesamiento continuo
+- GET  /procesamiento/scheduler/estado → Estado del scheduler
+- GET  /procesamiento/{id}/metricas    → Consultar métricas de una imagen
+- GET  /procesamiento/{id}/pasos       → Consultar pasos del pipeline
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user, get_db
@@ -35,9 +39,19 @@ from src.subsistema1.orquestador import (
     ejecutar_pipeline_local,
     ejecutar_pipeline_url,
 )
+from src.subsistema1 import scheduler
 
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 
+
+# ── Schemas del scheduler ─────────────────────────────────────────────────────
+
+class SchedulerStartRequest(BaseModel):
+    url: str | None = None
+    intervalo_segundos: int = 120
+
+
+# ── Endpoints de ejecución única ──────────────────────────────────────────────
 
 @router.post("/url", response_model=PipelineResponse, status_code=status.HTTP_202_ACCEPTED)
 async def procesar_desde_url(
@@ -47,13 +61,9 @@ async def procesar_desde_url(
     _user: dict = Depends(get_current_user),
 ) -> PipelineResponse:
     """
-    Descarga la imagen desde la URL DACC y ejecuta el pipeline completo.
+    Descarga la imagen desde la URL DACC y ejecuta el pipeline una vez.
 
     Si se omite `url`, usa la URL configurada en `.env` (`RADAR_URL`).
-    Devuelve el ID de la imagen creada y las métricas del pipeline.
-
-    **Cancelable:** Si cerrás la pestaña o hacés "Cancel" en Swagger,
-    el pipeline se detiene inmediatamente.
     """
     try:
         resultado = await ejecutar_pipeline_url(db, url=request.url, request=http_request)
@@ -91,11 +101,6 @@ async def procesar_desde_local(
 ) -> PipelineResponse:
     """
     Lee el archivo desde `file_path` en el servidor y ejecuta el pipeline.
-
-    El archivo debe ser un PNG o GIF con nombre en formato `radar_YYYYMMDD_HHMMSS.gif`.
-
-    **Cancelable:** Si cerrás la pestaña o hacés "Cancel" en Swagger,
-    el pipeline se detiene inmediatamente.
     """
     file_path = Path(request.file_path)
     if not file_path.exists():
@@ -137,29 +142,15 @@ async def procesar_carpeta(
     http_request: Request,
     _user: dict = Depends(get_current_user),
 ) -> BatchPipelineResponse:
-    """
-    Procesa todos los archivos .gif y .png de una carpeta del servidor secuencialmente.
-
-    Cada archivo usa su propia sesión de DB independiente.
-    Soporta cancelación: si el cliente se desconecta, devuelve resumen parcial.
-    """
+    """Procesa todos los archivos .gif y .png de una carpeta del servidor."""
     folder_path = Path(body.folder_path)
 
     if not folder_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Carpeta no encontrada: {folder_path}",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Carpeta no encontrada: {folder_path}")
     if not folder_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"La ruta no es una carpeta: {folder_path}",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"La ruta no es una carpeta: {folder_path}")
 
-    archivos = sorted(
-        list(folder_path.glob("*.gif")) + list(folder_path.glob("*.png"))
-    )
-
+    archivos = sorted(list(folder_path.glob("*.gif")) + list(folder_path.glob("*.png")))
     exitosos = 0
     fallidos = 0
     resultados = []
@@ -167,7 +158,6 @@ async def procesar_carpeta(
 
     for archivo in archivos:
         await asyncio.sleep(0)
-
         if await http_request.is_disconnected():
             cancelado = True
             break
@@ -176,61 +166,30 @@ async def procesar_carpeta(
             try:
                 resultado = await ejecutar_pipeline_local(archivo, file_db, request=http_request)
                 await file_db.commit()
-
                 exitosos += 1
                 m = resultado.metricas
                 resultados.append({
-                    "archivo": archivo.name,
-                    "imagen_id": resultado.imagen_id,
-                    "exito": True,
-                    "pixeles_originales": m.pixeles_originales,
-                    "pixeles_limpios": m.pixeles_limpios,
-                    "pixeles_rellenados": m.pixeles_rellenados,
-                    "pixeles_perdidos": m.pixeles_perdidos,
-                    "error_relleno_pct": float(m.error_relleno_pct),
-                    "score_match": float(m.score_match),
-                    "tiene_marco": m.tiene_marco,
-                    "mensaje_error": "",
+                    "archivo": archivo.name, "imagen_id": resultado.imagen_id, "exito": True,
+                    "pixeles_originales": m.pixeles_originales, "pixeles_limpios": m.pixeles_limpios,
+                    "pixeles_rellenados": m.pixeles_rellenados, "pixeles_perdidos": m.pixeles_perdidos,
+                    "error_relleno_pct": float(m.error_relleno_pct), "score_match": float(m.score_match),
+                    "tiene_marco": m.tiene_marco, "mensaje_error": "",
                 })
-
             except PipelineCanceladoError:
                 await file_db.rollback()
                 cancelado = True
-                resultados.append({
-                    "archivo": archivo.name,
-                    "imagen_id": None,
-                    "exito": False,
-                    "mensaje_error": "Cancelado por el cliente",
-                })
+                resultados.append({"archivo": archivo.name, "imagen_id": None, "exito": False, "mensaje_error": "Cancelado"})
                 break
-
             except ValueError as e:
                 await file_db.rollback()
                 fallidos += 1
-                resultados.append({
-                    "archivo": archivo.name,
-                    "imagen_id": None,
-                    "exito": False,
-                    "mensaje_error": str(e),
-                })
-
+                resultados.append({"archivo": archivo.name, "imagen_id": None, "exito": False, "mensaje_error": str(e)})
             except Exception as e:
                 await file_db.rollback()
                 fallidos += 1
-                resultados.append({
-                    "archivo": archivo.name,
-                    "imagen_id": None,
-                    "exito": False,
-                    "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}",
-                })
+                resultados.append({"archivo": archivo.name, "imagen_id": None, "exito": False, "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}"})
 
-    return BatchPipelineResponse(
-        total=len(archivos),
-        exitosos=exitosos,
-        fallidos=fallidos,
-        resultados=resultados,
-        cancelado=cancelado,
-    )
+    return BatchPipelineResponse(total=len(archivos), exitosos=exitosos, fallidos=fallidos, resultados=resultados, cancelado=cancelado)
 
 
 @router.post("/upload-lote", response_model=BatchPipelineResponse, status_code=status.HTTP_200_OK)
@@ -240,14 +199,10 @@ async def procesar_upload_lote(
     _user: dict = Depends(get_current_user),
 ) -> BatchPipelineResponse:
     """
-    Recibe archivos .gif/.png desde el cliente (upload), los guarda en /tmp/,
-    los procesa secuencialmente con el pipeline completo y limpia los temporales al finalizar.
-
-    Soporta cancelación: si el cliente se desconecta, devuelve resumen parcial.
+    Recibe archivos .gif/.png desde el cliente, los procesa y limpia los temporales.
     """
     tmp_dir = tempfile.mkdtemp(prefix="radar_lote_")
     try:
-        # Guardar archivos subidos en directorio temporal
         paths = []
         for archivo in archivos:
             if not (archivo.filename.endswith(".gif") or archivo.filename.endswith(".png")):
@@ -265,7 +220,6 @@ async def procesar_upload_lote(
 
         for path in paths:
             await asyncio.sleep(0)
-
             if await http_request.is_disconnected():
                 cancelado = True
                 break
@@ -277,48 +231,65 @@ async def procesar_upload_lote(
                     exitosos += 1
                     m = resultado.metricas
                     resultados.append({
-                        "archivo": path.name,
-                        "imagen_id": resultado.imagen_id,
-                        "exito": True,
-                        "pixeles_originales": m.pixeles_originales,
-                        "pixeles_limpios": m.pixeles_limpios,
-                        "pixeles_rellenados": m.pixeles_rellenados,
-                        "pixeles_perdidos": m.pixeles_perdidos,
-                        "error_relleno_pct": float(m.error_relleno_pct),
-                        "score_match": float(m.score_match),
-                        "tiene_marco": m.tiene_marco,
-                        "mensaje_error": "",
+                        "archivo": path.name, "imagen_id": resultado.imagen_id, "exito": True,
+                        "pixeles_originales": m.pixeles_originales, "pixeles_limpios": m.pixeles_limpios,
+                        "pixeles_rellenados": m.pixeles_rellenados, "pixeles_perdidos": m.pixeles_perdidos,
+                        "error_relleno_pct": float(m.error_relleno_pct), "score_match": float(m.score_match),
+                        "tiene_marco": m.tiene_marco, "mensaje_error": "",
                     })
                 except PipelineCanceladoError:
                     await file_db.rollback()
                     cancelado = True
-                    resultados.append({
-                        "archivo": path.name,
-                        "imagen_id": None,
-                        "exito": False,
-                        "mensaje_error": "Cancelado por el cliente",
-                    })
+                    resultados.append({"archivo": path.name, "imagen_id": None, "exito": False, "mensaje_error": "Cancelado"})
                     break
                 except Exception as e:
                     await file_db.rollback()
                     fallidos += 1
-                    resultados.append({
-                        "archivo": path.name,
-                        "imagen_id": None,
-                        "exito": False,
-                        "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}",
-                    })
+                    resultados.append({"archivo": path.name, "imagen_id": None, "exito": False, "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}"})
 
-        return BatchPipelineResponse(
-            total=len(paths),
-            exitosos=exitosos,
-            fallidos=fallidos,
-            resultados=resultados,
-            cancelado=cancelado,
-        )
+        return BatchPipelineResponse(total=len(paths), exitosos=exitosos, fallidos=fallidos, resultados=resultados, cancelado=cancelado)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+
+# ── Endpoints del scheduler (procesamiento continuo) ─────────────────────────
+
+@router.post("/scheduler/start", dependencies=[Depends(get_current_user)])
+async def iniciar_scheduler(body: SchedulerStartRequest) -> dict:
+    """
+    Inicia el procesamiento continuo desde la URL DACC.
+
+    Descarga y procesa cada `intervalo_segundos` (default: 120).
+    Si falla por cualquier motivo, igual espera y reintenta.
+    """
+    iniciado = scheduler.start(url=body.url, intervalo_segundos=body.intervalo_segundos)
+    if not iniciado:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El scheduler ya está activo.",
+        )
+    return {"mensaje": "Scheduler iniciado", **scheduler.get_estado()}
+
+
+@router.post("/scheduler/stop", dependencies=[Depends(get_current_user)])
+async def detener_scheduler() -> dict:
+    """Detiene el procesamiento continuo."""
+    detenido = scheduler.stop()
+    if not detenido:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="El scheduler no estaba activo.",
+        )
+    return {"mensaje": "Scheduler detenido", **scheduler.get_estado()}
+
+
+@router.get("/scheduler/estado", dependencies=[Depends(get_current_user)])
+async def estado_scheduler() -> dict:
+    """Devuelve el estado actual del scheduler (activo, último resultado, contadores)."""
+    return scheduler.get_estado()
+
+
+# ── Endpoints de métricas y pasos ─────────────────────────────────────────────
 
 @router.get("/{imagen_id}/metricas")
 async def obtener_metricas(
@@ -330,10 +301,7 @@ async def obtener_metricas(
     repo = MetricaProcesamientoRepository(db)
     metrica = await repo.obtener_por_imagen(imagen_id)
     if metrica is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Métricas no encontradas para esta imagen.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Métricas no encontradas.")
     return {
         "imagen_id": imagen_id,
         "pixeles_originales": metrica.pixeles_originales,
@@ -355,12 +323,6 @@ async def obtener_pasos(
     repo = ProcesamentoPasoRepository(db)
     pasos = await repo.listar_por_imagen(imagen_id)
     return [
-        {
-            "id": p.id,
-            "paso": p.paso,
-            "exitoso": p.exitoso,
-            "mensaje_error": p.mensaje_error,
-            "ejecutado_en": p.ejecutado_en,
-        }
+        {"id": p.id, "paso": p.paso, "exitoso": p.exitoso, "mensaje_error": p.mensaje_error, "ejecutado_en": p.ejecutado_en}
         for p in pasos
     ]

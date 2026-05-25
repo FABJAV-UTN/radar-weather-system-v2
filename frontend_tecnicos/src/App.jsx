@@ -7,6 +7,7 @@ import { Procesamiento } from './pages/Procesamiento';
 import { ProcesamientoLote } from './pages/ProcesamientoLote';
 import { Configuracion } from './pages/Configuracion';
 import { Perfil } from './pages/Perfil';
+import { LoteProvider } from './context/LoteContext';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -18,15 +19,17 @@ function ProtectedRoute({ children }) {
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
-        <Route path="/imagenes" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
-        <Route path="/procesamiento" element={<ProtectedRoute><Procesamiento /></ProtectedRoute>} />
-        <Route path="/procesamiento-lote" element={<ProtectedRoute><ProcesamientoLote /></ProtectedRoute>} />
-        <Route path="/configuracion" element={<ProtectedRoute><Configuracion /></ProtectedRoute>} />
-        <Route path="/perfil" element={<ProtectedRoute><Perfil /></ProtectedRoute>} />
-      </Routes>
+      <LoteProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
+          <Route path="/imagenes" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
+          <Route path="/procesamiento" element={<ProtectedRoute><Procesamiento /></ProtectedRoute>} />
+          <Route path="/procesamiento-lote" element={<ProtectedRoute><ProcesamientoLote /></ProtectedRoute>} />
+          <Route path="/configuracion" element={<ProtectedRoute><Configuracion /></ProtectedRoute>} />
+          <Route path="/perfil" element={<ProtectedRoute><Perfil /></ProtectedRoute>} />
+        </Routes>
+      </LoteProvider>
     </BrowserRouter>
   );
 }

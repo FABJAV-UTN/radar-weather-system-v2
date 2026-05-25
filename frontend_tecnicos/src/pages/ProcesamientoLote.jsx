@@ -1,22 +1,16 @@
-import { useState, useRef } from 'react';
-import { api, cancelRequest } from '../services/api';
+import { useRef } from 'react';
+import { useLote } from '../context/LoteContext';
 
 export function ProcesamientoLote() {
-  const [archivos, setArchivos] = useState([]);
-  const [resultado, setResultado] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [currentRequestId, setCurrentRequestId] = useState(null);
+  const {
+    archivos, resultado, error, loading, procesados,
+    seleccionarArchivos, procesar, cancelar, limpiar,
+  } = useLote();
+
   const inputRef = useRef(null);
 
   const handleSeleccion = (e) => {
-    const files = Array.from(e.target.files).filter(
-      f => f.name.endsWith('.gif') || f.name.endsWith('.png')
-    );
-    setArchivos(files);
-    setResultado(null);
-    setError('');
-    // Resetear el input para que se pueda volver a seleccionar la misma carpeta
+    seleccionarArchivos(e.target.files);
     e.target.value = '';
   };
 
@@ -28,39 +22,6 @@ export function ProcesamientoLote() {
   const abrirSelectorCarpeta = () => {
     inputRef.current.setAttribute('webkitdirectory', '');
     inputRef.current.click();
-  };
-
-  const handleProcesar = async () => {
-    if (!archivos.length) return;
-    setError('');
-    setResultado(null);
-    setLoading(true);
-
-    try {
-      const promise = api.procesarUploadLote(archivos);
-      setCurrentRequestId(promise._id);
-      const data = await promise;
-      setResultado(data);
-    } catch (err) {
-      if (err.name === 'AbortError' || err.message?.includes('abort')) {
-        setError('Procesamiento cancelado por el usuario');
-      } else {
-        setError(err.message);
-      }
-    } finally {
-      setLoading(false);
-      setCurrentRequestId(null);
-    }
-  };
-
-  const handleCancelar = () => {
-    if (currentRequestId) cancelRequest(currentRequestId);
-  };
-
-  const limpiarSeleccion = () => {
-    setArchivos([]);
-    setResultado(null);
-    setError('');
   };
 
   return (
@@ -75,7 +36,6 @@ export function ProcesamientoLote() {
           Se suben al servidor y se procesan secuencialmente.
         </p>
 
-        {/* Input oculto */}
         <input
           ref={inputRef}
           type="file"
@@ -87,26 +47,15 @@ export function ProcesamientoLote() {
 
         <div className="space-y-4">
           {/* Botones de selección */}
-          <div className="flex gap-3">
-            <button
-              onClick={abrirSelectorArchivos}
-              disabled={loading}
-              className="btn btn-outline"
-            >
+          <div className="flex flex-wrap gap-3">
+            <button onClick={abrirSelectorArchivos} disabled={loading} className="btn btn-outline">
               🗂️ Seleccionar archivos
             </button>
-            <button
-              onClick={abrirSelectorCarpeta}
-              disabled={loading}
-              className="btn btn-outline"
-            >
+            <button onClick={abrirSelectorCarpeta} disabled={loading} className="btn btn-outline">
               📁 Seleccionar carpeta
             </button>
             {archivos.length > 0 && !loading && (
-              <button
-                onClick={limpiarSeleccion}
-                className="btn btn-outline text-gray-400 hover:text-red-500"
-              >
+              <button onClick={limpiar} className="btn btn-outline text-gray-400 hover:text-red-500">
                 ✕ Limpiar
               </button>
             )}
@@ -133,38 +82,46 @@ export function ProcesamientoLote() {
             </div>
           )}
 
+          {/* Progreso en tiempo real mientras carga */}
+          {loading && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="animate-spin text-xl">⏳</span>
+                <p className="text-sm font-medium text-amber-700">
+                  Procesando lote... {procesados > 0 && `(${procesados} completados)`}
+                </p>
+              </div>
+              <div className="w-full bg-amber-100 rounded-full h-2">
+                <div
+                  className="bg-amber-400 h-2 rounded-full transition-all duration-500"
+                  style={{ width: archivos.length > 0 ? `${Math.min((procesados / archivos.length) * 100, 95)}%` : '10%' }}
+                />
+              </div>
+              <p className="text-xs text-amber-600 mt-2">
+                Podés navegar a otras secciones — el procesamiento continúa en segundo plano.
+              </p>
+            </div>
+          )}
+
           {/* Botones de acción */}
           <div className="flex gap-3">
             <button
-              onClick={handleProcesar}
+              onClick={procesar}
               disabled={loading || !archivos.length}
               className="btn btn-primary"
             >
               {loading ? (
-                <>
-                  <span className="animate-spin inline-block">⏳</span>
-                  Procesando lote...
-                </>
+                <><span className="animate-spin inline-block">⏳</span> Procesando...</>
               ) : (
                 <>▶️ Procesar {archivos.length > 0 ? `(${archivos.length})` : ''}</>
               )}
             </button>
-
             {loading && (
-              <button
-                onClick={handleCancelar}
-                className="btn btn-danger animate-pulse"
-              >
+              <button onClick={cancelar} className="btn btn-danger animate-pulse">
                 🛑 Cancelar
               </button>
             )}
           </div>
-
-          {loading && (
-            <p className="text-xs text-gray-400">
-              Los archivos ya procesados quedan guardados aunque canceles.
-            </p>
-          )}
         </div>
       </div>
 
@@ -198,7 +155,6 @@ export function ProcesamientoLote() {
                     <th className="px-4 py-2 text-left font-semibold text-gray-600">Archivo</th>
                     <th className="px-4 py-2 text-left font-semibold text-gray-600">Estado</th>
                     <th className="px-4 py-2 text-left font-semibold text-gray-600">ID</th>
-                    <th className="px-4 py-2 text-left font-semibold text-gray-600">Score</th>
                     <th className="px-4 py-2 text-left font-semibold text-gray-600">Mensaje</th>
                   </tr>
                 </thead>
@@ -213,9 +169,6 @@ export function ProcesamientoLote() {
                       </td>
                       <td className="px-4 py-2 font-mono text-xs">
                         {r.imagen_id ? `#${r.imagen_id}` : '—'}
-                      </td>
-                      <td className="px-4 py-2 font-mono text-xs">
-                        {r.score_match != null ? `${(r.score_match * 100).toFixed(1)}%` : '—'}
                       </td>
                       <td className="px-4 py-2 text-xs text-gray-500">
                         {r.mensaje_error || 'OK'}
