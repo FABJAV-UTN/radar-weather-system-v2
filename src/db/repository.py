@@ -1,4 +1,3 @@
-
 # src/db/repository.py
 """
 Patrón Repository: toda la lógica de acceso a datos en un único lugar.
@@ -8,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import ImagenRadar, IntentoDescarga, MetricaProcesamiento, ProcesamentoPaso, Usuario, RolUsuario
@@ -96,6 +95,42 @@ class ImagenRadarRepository:
         if origen:
             stmt = stmt.where(ImagenRadar.origen == origen)
         stmt = stmt.order_by(ImagenRadar.fecha_hora.desc()).limit(limit).offset(offset)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def contar(
+        self,
+        estado: str | None = None,
+        origen: str | None = None,
+    ) -> int:
+        """
+        Devuelve el total de registros que coinciden con los filtros,
+        sin aplicar limit ni offset. Usado para calcular páginas en el frontend.
+        """
+        stmt = select(func.count()).select_from(ImagenRadar)
+        if estado:
+            stmt = stmt.where(ImagenRadar.estado == estado)
+        if origen:
+            stmt = stmt.where(ImagenRadar.origen == origen)
+        result = await self._session.execute(stmt)
+        return result.scalar_one()
+
+    async def listar_por_rango(
+        self,
+        desde: datetime,
+        hasta: datetime,
+    ) -> list[ImagenRadar]:
+        """
+        Lista todas las imágenes cuya fecha_hora esté entre `desde` y `hasta`
+        (ambos inclusive), ordenadas por fecha_hora ascendente.
+        Usado por el endpoint de descarga masiva ZIP.
+        """
+        stmt = (
+            select(ImagenRadar)
+            .where(ImagenRadar.fecha_hora >= desde)
+            .where(ImagenRadar.fecha_hora <= hasta)
+            .order_by(ImagenRadar.fecha_hora.asc())
+        )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -421,4 +456,3 @@ class UsuarioRepository:
             .where(Usuario.id == usuario_id)
             .values(rol=rol)
         )
-

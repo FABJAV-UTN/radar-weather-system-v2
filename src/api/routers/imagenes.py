@@ -3,14 +3,19 @@
 Router de imágenes: listado, detalle y descarga de GeoTIFF.
 
 Endpoints:
-- GET  /imagenes              → Lista paginada
-- GET  /imagenes/{id}         → Detalle de una imagen
-- GET  /imagenes/{id}/geotiff → Descarga del GeoTIFF final
+- GET  /imagenes                              → Lista paginada
+- GET  /imagenes/descargar-lote?desde=&hasta= → ZIP con GeoTIFFs de un rango de fechas
+- GET  /imagenes/{id}                         → Detalle de una imagen
+- GET  /imagenes/{id}/geotiff                 → Descarga del GeoTIFF final
 """
 from __future__ import annotations
 
+import io
+import zipfile
+from datetime import date, datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user, get_db
@@ -19,6 +24,8 @@ from src.db.repository import ImagenRadarRepository
 
 router = APIRouter(prefix="/imagenes", tags=["imagenes"])
 
+
+# ── Listado paginado ───────────────────────────────────────────────────────────
 
 @router.get("", response_model=ImagenListaResponse)
 async def listar_imagenes(
@@ -34,16 +41,67 @@ async def listar_imagenes(
 
     - **estado**: pendiente | procesando | completado | error
     - **origen**: local | url
+
+    Devuelve `total` con el conteo real (sin limit/offset) para calcular páginas.
     """
     repo = ImagenRadarRepository(db)
+    total = await repo.contar(estado=estado, origen=origen)
     items = await repo.listar(estado=estado, origen=origen, limit=limit, offset=offset)
     return ImagenListaResponse(
-        total=len(items),
+        total=total,
         limit=limit,
         offset=offset,
         items=[ImagenResumen.model_validate(i) for i in items],
     )
 
+
+# ── Descarga masiva como ZIP ───────────────────────────────────────────────────
+# IMPORTANTE: esta ruta debe ir ANTES de /{imagen_id} para que FastAPI no
+# intente parsear "descargar-lote" como un int.
+
+@router.get("/descargar-lote")
+async def descargar_lote(
+    desde: date = Query(..., description="Fecha de inicio (YYYY-MM-DD, inclusive)"),
+    hasta: date = Query(..., description="Fecha de fin (YYYY-MM-DD, inclusive)"),
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+) -> StreamingResponse:
+    """
+    Descarga un ZIP con todos los GeoTIFFs completados en el rango [desde, hasta].
+
+    El ZIP se arma en memoria; cada archivo se llama `radar_<id>_<fecha_hora>.tif`.
+    Si no hay imágenes completadas en el rango, devuelve 404.
+    """
+    repo = ImagenRadarRepository(db)
+    imagenes = await repo.listar_por_rango(
+        desde=datetime(desde.year, desde.month, desde.day, 0, 0, 0),
+        hasta=datetime(hasta.year, hasta.month, hasta.day, 23, 59, 59),
+    )
+
+    completadas = [img for img in imagenes if img.estado == "completado" and img.geotiff_data]
+    if not completadas:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No hay imágenes completadas entre {desde} y {hasta}.",
+        )
+
+    # Armar ZIP en memoria
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for img in completadas:
+            filename = f"radar_{img.id}_{img.fecha_hora.strftime('%Y%m%d_%H%M%S')}.tif"
+            zf.writestr(filename, img.geotiff_data)
+    zip_buffer.seek(0)
+
+    zip_filename = f"radar_{desde.strftime('%Y%m%d')}_{hasta.strftime('%Y%m%d')}.zip"
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )
+
+
+# ── Detalle ────────────────────────────────────────────────────────────────────
 
 @router.get("/{imagen_id}", response_model=ImagenDetalle)
 async def obtener_imagen(
@@ -58,6 +116,8 @@ async def obtener_imagen(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Imagen no encontrada.")
     return ImagenDetalle.model_validate(imagen)
 
+
+# ── Descarga individual ────────────────────────────────────────────────────────
 
 @router.get(
     "/{imagen_id}/geotiff",

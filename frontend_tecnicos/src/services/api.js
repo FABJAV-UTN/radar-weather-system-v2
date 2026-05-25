@@ -145,7 +145,6 @@ export const api = {
 
   obtenerImagen: (id) => request(`/imagenes/${id}`),
 
-  // ✅ FIX: usa API_BASE relativa para que pase por el proxy de Vite/nginx
   descargarGeotiff: async (id, filename) => {
     const token = localStorage.getItem('access_token');
     const response = await fetch(`${API_BASE}/imagenes/${id}/geotiff`, {
@@ -160,6 +159,27 @@ export const api = {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename || `radar_${id}.tif`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
+
+  descargarLote: async (desde, hasta) => {
+    const token = localStorage.getItem('access_token');
+    const response = await fetch(
+      `${API_BASE}/imagenes/descargar-lote?desde=${desde}&hasta=${hasta}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new ApiError(data.detail || `Error ${response.status}`, response.status);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `radar_${desde}_${hasta}.zip`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -215,6 +235,9 @@ export const api = {
     promise._id = id;
     return promise;
   },
+
+  cancelarLote: () =>
+    request('/procesamiento/lote/cancelar', { method: 'POST' }),
 
   // Scheduler — procesamiento continuo
   schedulerStart: (url = null, intervalo_segundos = 120) =>

@@ -3,17 +3,15 @@ import { api } from '../services/api';
 
 // Mapa de colores dBZ → descripción legible
 const DBZ_NIVELES = [
-  { min: 0,  max: 15, label: '< 15',  desc: 'Sin lluvia',      color: 'bg-gray-100 text-gray-500' },
-  { min: 15, max: 25, label: '15–25', desc: 'Llovizna',        color: 'bg-blue-100 text-blue-600' },
-  { min: 25, max: 35, label: '25–35', desc: 'Lluvia leve',     color: 'bg-cyan-100 text-cyan-700' },
-  { min: 35, max: 45, label: '35–45', desc: 'Lluvia moderada', color: 'bg-yellow-100 text-yellow-700' },
-  { min: 45, max: 55, label: '45–55', desc: 'Lluvia intensa',  color: 'bg-orange-100 text-orange-700' },
-  { min: 55, max: 999, label: '> 55', desc: 'Tormenta severa', color: 'bg-red-100 text-red-700' },
+  { min: 0,  max: 15,  label: '< 15',  desc: 'Sin lluvia',      color: 'bg-gray-100 text-gray-500' },
+  { min: 15, max: 25,  label: '15–25', desc: 'Llovizna',        color: 'bg-blue-100 text-blue-600' },
+  { min: 25, max: 35,  label: '25–35', desc: 'Lluvia leve',     color: 'bg-cyan-100 text-cyan-700' },
+  { min: 35, max: 45,  label: '35–45', desc: 'Lluvia moderada', color: 'bg-yellow-100 text-yellow-700' },
+  { min: 45, max: 55,  label: '45–55', desc: 'Lluvia intensa',  color: 'bg-orange-100 text-orange-700' },
+  { min: 55, max: 999, label: '> 55',  desc: 'Tormenta severa', color: 'bg-red-100 text-red-700' },
 ];
 
 function getDbzNivel(pixeles_originales, pixeles_limpios) {
-  // Estimación simple: si no hay datos de dBZ directo, usamos la densidad de píxeles
-  // como proxy. En el futuro el backend puede devolver dBZ max directamente.
   if (!pixeles_originales || pixeles_originales === 0) return null;
   const densidad = pixeles_limpios / pixeles_originales;
   if (densidad > 0.8) return DBZ_NIVELES[5];
@@ -31,29 +29,60 @@ const ESTADO_BADGE = {
   error:      'bg-red-100 text-red-700',
 };
 
-// ── Íconos de ordenamiento ────────────────────────────────────────────────────
 function SortIcon({ col, sortCol, sortDir }) {
   if (sortCol !== col) return <span className="ml-1 text-gray-300">↕</span>;
   return <span className="ml-1 text-celeste">{sortDir === 'asc' ? '↑' : '↓'}</span>;
 }
 
-export function Imagenes() {
-  const [imagenes, setImagenes] = useState([]);
-  const [metricas, setMetricas] = useState({});
-  const [loading, setLoading] = useState(true);
-  const [descargando, setDescargando] = useState(null);
-  const [filtro, setFiltro] = useState({ estado: '', origen: '' });
-  const [sortCol, setSortCol] = useState('id');
-  const [sortDir, setSortDir] = useState('desc');
+// Fecha de hoy en formato YYYY-MM-DD para los inputs date
+function hoy() {
+  return new Date().toISOString().slice(0, 10);
+}
 
+// Fecha de hace 7 días
+function haceUnaSemana() {
+  const d = new Date();
+  d.setDate(d.getDate() - 7);
+  return d.toISOString().slice(0, 10);
+}
+
+export function Imagenes() {
+  // ── Estado de datos ──────────────────────────────────────────────────────
+  const [imagenes, setImagenes]   = useState([]);
+  const [metricas, setMetricas]   = useState({});
+  const [total, setTotal]         = useState(0);
+  const [loading, setLoading]     = useState(true);
+  const [descargando, setDescargando] = useState(null);
+
+  // ── Filtros ──────────────────────────────────────────────────────────────
+  const [filtro, setFiltro]       = useState({ estado: '', origen: '' });
+
+  // ── Paginación ───────────────────────────────────────────────────────────
+  const [pagina, setPagina]       = useState(1);
+  const [porPagina, setPorPagina] = useState(50);
+
+  // ── Ordenamiento ─────────────────────────────────────────────────────────
+  const [sortCol, setSortCol]     = useState('id');
+  const [sortDir, setSortDir]     = useState('desc');
+
+  // ── Panel descarga lote ───────────────────────────────────────────────────
+  const [mostrarLote, setMostrarLote]         = useState(false);
+  const [loteDesde, setLoteDesde]             = useState(haceUnaSemana);
+  const [loteHasta, setLoteHasta]             = useState(hoy);
+  const [descargandoLote, setDescargandoLote] = useState(false);
+  const [errorLote, setErrorLote]             = useState('');
+
+  // ── Carga de datos ────────────────────────────────────────────────────────
   const cargarImagenes = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.listarImagenes({ ...filtro, limit: 100 });
+      const offset = (pagina - 1) * porPagina;
+      const data = await api.listarImagenes({ ...filtro, limit: porPagina, offset });
       const items = data.items || [];
       setImagenes(items);
+      setTotal(data.total ?? items.length);
 
-      // Cargar métricas de las completadas (en paralelo, sin bloquear)
+      // Métricas en paralelo, solo para completadas de esta página
       const completadas = items.filter(i => i.estado === 'completado');
       const metricasMap = {};
       await Promise.allSettled(
@@ -61,9 +90,7 @@ export function Imagenes() {
           try {
             const m = await api.obtenerMetricas(img.id);
             metricasMap[img.id] = m;
-          } catch {
-            // silencioso
-          }
+          } catch { /* silencioso */ }
         })
       );
       setMetricas(metricasMap);
@@ -72,12 +99,23 @@ export function Imagenes() {
     } finally {
       setLoading(false);
     }
-  }, [filtro]);
+  }, [filtro, pagina, porPagina]);
 
   useEffect(() => {
     cargarImagenes();
   }, [cargarImagenes]);
 
+  // Al cambiar filtros o porPagina, volver a página 1
+  const handleFiltro = (nuevoFiltro) => {
+    setFiltro(nuevoFiltro);
+    setPagina(1);
+  };
+  const handlePorPagina = (n) => {
+    setPorPagina(n);
+    setPagina(1);
+  };
+
+  // ── Ordenamiento ─────────────────────────────────────────────────────────
   const handleSort = (col) => {
     if (sortCol === col) {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -87,9 +125,27 @@ export function Imagenes() {
     }
   };
 
+  const imagenesSorted = [...imagenes].sort((a, b) => {
+    let va, vb;
+    switch (sortCol) {
+      case 'id':     va = a.id;                    vb = b.id;                    break;
+      case 'fecha':  va = new Date(a.fecha_hora);  vb = new Date(b.fecha_hora);  break;
+      case 'origen': va = a.origen;                vb = b.origen;                break;
+      case 'estado': va = a.estado;                vb = b.estado;                break;
+      case 'dbz':
+        va = metricas[a.id]?.pixeles_limpios || 0;
+        vb = metricas[b.id]?.pixeles_limpios || 0;
+        break;
+      default: va = a.id; vb = b.id;
+    }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ?  1 : -1;
+    return 0;
+  });
+
+  // ── Descarga individual ───────────────────────────────────────────────────
   const handleDescargar = async (img) => {
-    console.log('handleDescargar llamado', img.id);
-     if (img.estado !== 'completado' || descargando) return;
+    if (img.estado !== 'completado' || descargando) return;
     setDescargando(img.id);
     try {
       const fecha = img.fecha_hora?.replace(/[:\s]/g, '_') || img.id;
@@ -101,29 +157,23 @@ export function Imagenes() {
     }
   };
 
-  // Ordenamiento client-side
-  const imagenesSorted = [...imagenes].sort((a, b) => {
-    let va, vb;
-    switch (sortCol) {
-      case 'id':
-        va = a.id; vb = b.id; break;
-      case 'fecha':
-        va = new Date(a.fecha_hora); vb = new Date(b.fecha_hora); break;
-      case 'origen':
-        va = a.origen; vb = b.origen; break;
-      case 'estado':
-        va = a.estado; vb = b.estado; break;
-      case 'dbz':
-        va = metricas[a.id]?.pixeles_limpios || 0;
-        vb = metricas[b.id]?.pixeles_limpios || 0;
-        break;
-      default:
-        va = a.id; vb = b.id;
+  // ── Descarga lote (ZIP) ───────────────────────────────────────────────────
+  const handleDescargarLote = async () => {
+    if (!loteDesde || !loteHasta) return;
+    setDescargandoLote(true);
+    setErrorLote('');
+    try {
+      await api.descargarLote(loteDesde, loteHasta);
+      setMostrarLote(false);
+    } catch (err) {
+      setErrorLote(err.message || 'Error al generar el ZIP');
+    } finally {
+      setDescargandoLote(false);
     }
-    if (va < vb) return sortDir === 'asc' ? -1 : 1;
-    if (va > vb) return sortDir === 'asc' ? 1 : -1;
-    return 0;
-  });
+  };
+
+  // ── Paginación ────────────────────────────────────────────────────────────
+  const totalPaginas = Math.max(1, Math.ceil(total / porPagina));
 
   const ThSortable = ({ col, children }) => (
     <th
@@ -137,12 +187,13 @@ export function Imagenes() {
 
   return (
     <div className="space-y-4">
-      {/* Filtros */}
+
+      {/* ── Filtros + acciones ── */}
       <div className="card p-4 flex flex-wrap items-center gap-3">
         <select
           className="form-select w-full sm:w-44"
           value={filtro.estado}
-          onChange={(e) => setFiltro({ ...filtro, estado: e.target.value })}
+          onChange={(e) => handleFiltro({ ...filtro, estado: e.target.value })}
         >
           <option value="">Todos los estados</option>
           <option value="completado">Completado</option>
@@ -150,26 +201,81 @@ export function Imagenes() {
           <option value="procesando">Procesando</option>
           <option value="error">Error</option>
         </select>
+
         <select
           className="form-select w-full sm:w-44"
           value={filtro.origen}
-          onChange={(e) => setFiltro({ ...filtro, origen: e.target.value })}
+          onChange={(e) => handleFiltro({ ...filtro, origen: e.target.value })}
         >
           <option value="">Todos los orígenes</option>
           <option value="local">Local</option>
           <option value="url">URL DACC</option>
         </select>
+
         <button onClick={cargarImagenes} className="btn btn-outline w-full sm:w-auto">
           🔄 Actualizar
         </button>
+
+        {/* Botón descarga lote */}
+        <button
+          onClick={() => { setMostrarLote(v => !v); setErrorLote(''); }}
+          className="btn btn-outline w-full sm:w-auto"
+        >
+          ⬇️ Descargar lote
+        </button>
+
         {!loading && (
           <span className="text-xs text-gray-400 ml-auto">
-            {imagenes.length} imagen{imagenes.length !== 1 ? 'es' : ''}
+            {total} imagen{total !== 1 ? 'es' : ''}
           </span>
         )}
       </div>
 
-      {/* Tabla */}
+      {/* ── Panel descarga lote ── */}
+      {mostrarLote && (
+        <div className="card p-4 space-y-3 border border-celeste/30">
+          <p className="text-sm font-semibold text-gray-700">
+            Descargar GeoTIFFs como ZIP por rango de fechas
+          </p>
+          <div className="flex flex-wrap gap-3 items-end">
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Desde</label>
+              <input
+                type="date"
+                className="form-input"
+                value={loteDesde}
+                max={loteHasta}
+                onChange={(e) => setLoteDesde(e.target.value)}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-gray-500">Hasta</label>
+              <input
+                type="date"
+                className="form-input"
+                value={loteHasta}
+                min={loteDesde}
+                onChange={(e) => setLoteHasta(e.target.value)}
+              />
+            </div>
+            <button
+              onClick={handleDescargarLote}
+              disabled={descargandoLote || !loteDesde || !loteHasta}
+              className="btn btn-primary"
+            >
+              {descargandoLote ? '⏳ Generando ZIP…' : '⬇️ Confirmar descarga'}
+            </button>
+          </div>
+          {errorLote && (
+            <p className="text-sm text-red-600">⚠️ {errorLote}</p>
+          )}
+          <p className="text-xs text-gray-400">
+            Solo se incluyen imágenes con estado <strong>completado</strong>.
+          </p>
+        </div>
+      )}
+
+      {/* ── Tabla ── */}
       <div className="card overflow-hidden">
         {loading ? (
           <div className="p-12 text-center text-gray-400">
@@ -238,7 +344,7 @@ export function Imagenes() {
 
                       <td className="px-3 md:px-6 py-4">
                         <button
-                          onClick={() => { console.log('click', img.id, tieneGeotiff, descargando); handleDescargar(img); }}
+                          onClick={() => handleDescargar(img)}
                           disabled={!tieneGeotiff || descargando === img.id}
                           className={`text-sm font-medium transition-colors flex items-center gap-1 ${
                             tieneGeotiff
@@ -262,6 +368,51 @@ export function Imagenes() {
           </div>
         )}
       </div>
+
+      {/* ── Controles de paginación ── */}
+      {!loading && total > 0 && (
+        <div className="card p-3 flex flex-wrap items-center justify-between gap-3">
+          {/* Selector por página */}
+          <div className="flex items-center gap-2 text-sm text-gray-600">
+            <span>Mostrar</span>
+            {[50, 100, 200].map(n => (
+              <button
+                key={n}
+                onClick={() => handlePorPagina(n)}
+                className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+                  porPagina === n
+                    ? 'bg-celeste text-white border-celeste'
+                    : 'border-gray-200 hover:border-celeste hover:text-celeste'
+                }`}
+              >
+                {n}
+              </button>
+            ))}
+            <span>por página</span>
+          </div>
+
+          {/* Página X de Y + botones */}
+          <div className="flex items-center gap-2 text-sm">
+            <button
+              onClick={() => setPagina(p => Math.max(1, p - 1))}
+              disabled={pagina === 1}
+              className="btn btn-outline py-1 px-3 disabled:opacity-40"
+            >
+              ← Anterior
+            </button>
+            <span className="text-gray-600 whitespace-nowrap">
+              Página <strong>{pagina}</strong> de <strong>{totalPaginas}</strong>
+            </span>
+            <button
+              onClick={() => setPagina(p => Math.min(totalPaginas, p + 1))}
+              disabled={pagina === totalPaginas}
+              className="btn btn-outline py-1 px-3 disabled:opacity-40"
+            >
+              Siguiente →
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
