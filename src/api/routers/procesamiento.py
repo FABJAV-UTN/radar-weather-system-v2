@@ -7,6 +7,7 @@ Endpoints:
 - POST /procesamiento/local            → Ejecutar pipeline desde archivo local
 - POST /procesamiento/carpeta          → Procesar lote desde carpeta del servidor
 - POST /procesamiento/upload-lote      → Procesar lote via upload desde el cliente
+- POST /procesamiento/lote/cancelar    → Setear flag de cancelación del lote activo  ← NUEVO
 - POST /procesamiento/scheduler/start  → Iniciar procesamiento continuo desde URL
 - POST /procesamiento/scheduler/stop   → Detener procesamiento continuo
 - GET  /procesamiento/scheduler/estado → Estado del scheduler
@@ -42,6 +43,22 @@ from src.subsistema1.orquestador import (
 from src.subsistema1 import scheduler
 
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
+
+
+# ── Flag de cancelación del lote activo ──────────────────────────────────────
+# Se usa una variable de módulo (proceso único por worker de uvicorn).
+# Se resetea al iniciar cada nuevo lote y se activa vía POST /lote/cancelar.
+
+_lote_cancelado: bool = False
+
+
+def _reset_cancelacion() -> None:
+    global _lote_cancelado
+    _lote_cancelado = False
+
+
+def _lote_fue_cancelado() -> bool:
+    return _lote_cancelado
 
 
 # ── Schemas del scheduler ─────────────────────────────────────────────────────
@@ -200,7 +217,15 @@ async def procesar_upload_lote(
 ) -> BatchPipelineResponse:
     """
     Recibe archivos .gif/.png desde el cliente, los procesa y limpia los temporales.
+
+    La cancelación se detecta por dos vías (OR):
+      1. `http_request.is_disconnected()` — el cliente cortó la conexión HTTP.
+      2. `_lote_cancelado` — el cliente llamó a POST /procesamiento/lote/cancelar
+         (necesario cuando el body ya fue recibido completo y is_disconnected no dispara).
     """
+    # ── Reset de la flag al iniciar un nuevo lote ────────────────────────────
+    _reset_cancelacion()
+
     tmp_dir = tempfile.mkdtemp(prefix="radar_lote_")
     try:
         paths = []
@@ -220,7 +245,9 @@ async def procesar_upload_lote(
 
         for path in paths:
             await asyncio.sleep(0)
-            if await http_request.is_disconnected():
+
+            # ── Chequeo doble de cancelación ─────────────────────────────────
+            if _lote_fue_cancelado() or await http_request.is_disconnected():
                 cancelado = True
                 break
 
@@ -250,6 +277,22 @@ async def procesar_upload_lote(
         return BatchPipelineResponse(total=len(paths), exitosos=exitosos, fallidos=fallidos, resultados=resultados, cancelado=cancelado)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ── Endpoint de cancelación del lote activo ───────────────────────────────────
+
+@router.post("/lote/cancelar", dependencies=[Depends(get_current_user)])
+async def cancelar_lote() -> dict:
+    """
+    Señala al loop de upload-lote que debe detenerse en la próxima iteración.
+
+    El frontend lo llama cuando el usuario hace clic en "Cancelar", en paralelo
+    al abort del fetch (AbortController). Esto cubre el caso en que el body
+    ya fue recibido completo y `is_disconnected()` no llega a dispararse.
+    """
+    global _lote_cancelado
+    _lote_cancelado = True
+    return {"mensaje": "Señal de cancelación recibida. El lote se detendrá en el próximo archivo."}
 
 
 # ── Endpoints del scheduler (procesamiento continuo) ─────────────────────────

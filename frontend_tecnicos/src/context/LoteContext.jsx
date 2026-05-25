@@ -48,8 +48,22 @@ export function LoteProvider({ children }) {
     }
   }, [archivos]);
 
-  const cancelar = useCallback(() => {
-    if (currentRequestId) cancelRequest(currentRequestId);
+  const cancelar = useCallback(async () => {
+    if (!currentRequestId) return;
+
+    // 1. Señal directa al backend (fetch independiente, sin AbortController del lote)
+    const token = localStorage.getItem('access_token');
+    try {
+      await fetch(`${import.meta.env.VITE_API_URL || '/api/v1'}/procesamiento/lote/cancelar`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+    } catch {
+      // ignorado
+    }
+
+    // 2. Abortar el fetch principal
+    cancelRequest(currentRequestId);
   }, [currentRequestId]);
 
   const limpiar = useCallback(() => {
