@@ -165,6 +165,7 @@ def array_to_geotiff_bytes(
     transform: Affine,
     crs: object,
     compress: str = COMPRESS,
+    nodata: int | None = 0,
 ) -> bytes:
     """
     Convierte un array numpy a bytes de GeoTIFF en memoria (sin escribir a disco).
@@ -174,6 +175,7 @@ def array_to_geotiff_bytes(
         transform: Affine Transform corregido.
         crs: Sistema de referencia de coordenadas (ej: EPSG:4326).
         compress: Algoritmo de compresión ('lzw', 'deflate', 'none').
+        nodata: Valor NoData del raster (default=0, píxel negro = sin datos).
 
     Returns:
         Bytes del GeoTIFF listo para persistir en base de datos.
@@ -198,6 +200,7 @@ def array_to_geotiff_bytes(
         crs=crs,
         transform=transform,
         compress=compress,
+        nodata=nodata,
     ) as dst:
         for i, band in enumerate(bands, start=1):
             dst.write(band, i)
@@ -218,6 +221,7 @@ class GeoResultado:
         "score_match",
         "delta_lon",
         "delta_lat",
+        "clutter_mask",  # máscara booleana H×W de ecos fijos en la imagen
     )
 
     def __init__(
@@ -228,6 +232,7 @@ class GeoResultado:
         score_match: float,
         delta_lon: float,
         delta_lat: float,
+        clutter_mask: np.ndarray | None = None,
     ) -> None:
         self.geotiff_bytes = geotiff_bytes
         self.transform_affine = transform_affine
@@ -235,6 +240,7 @@ class GeoResultado:
         self.score_match = score_match
         self.delta_lon = delta_lon
         self.delta_lat = delta_lat
+        self.clutter_mask = clutter_mask
 
 
 def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
@@ -249,13 +255,17 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
     5. Template matching binario: encontrar dónde está el eco en la imagen.
     6. Calcular delta geográfico entre posición encontrada y posición real.
     7. Corregir el Affine Transform.
-    8. Generar GeoTIFF final en memoria (BytesIO).
+    8. Construir máscara booleana de clutter (ecos fijos) en coordenadas de imagen.
+    9. Generar GeoTIFF final en memoria (BytesIO), con píxeles de clutter
+       puestos a 0 (NoData) para que no aparezcan como precipitación real.
 
     Args:
         filled_rgb: Array (H, W, 3) uint8. Imagen post-relleno de huecos.
 
     Returns:
-        GeoResultado con los bytes del GeoTIFF y metadatos de geolocalización.
+        GeoResultado con los bytes del GeoTIFF sin ecos fijos, metadatos de
+        geolocalización y clutter_mask (máscara booleana H×W de la zona de
+        ecos fijos, útil para métricas y template matching).
 
     Raises:
         FileNotFoundError: Si los templates no están en template_dir.
@@ -317,8 +327,31 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
     # ── 7. Corregir Transform ─────────────────────────────────────────────────
     corrected_transform = correct_transform(ref_transform, delta_lon, delta_lat)
 
-    # ── 8. Generar GeoTIFF en memoria ─────────────────────────────────────────
-    geotiff_bytes = array_to_geotiff_bytes(filled_rgb, corrected_transform, ref_crs)
+    # ── 8. Construir máscara booleana de clutter en coordenadas de la imagen ──
+    # La zona del eco fijo ocupa [match_row:match_row+eco_h, match_col:match_col+eco_w]
+    # Usamos la forma exacta del eco (eco_mask > 0) para no enmascarar de más.
+    clutter_mask = np.zeros((height, width), dtype=bool)
+    row_end = min(match_row + eco_h, height)
+    col_end = min(match_col + eco_w, width)
+    clutter_mask[match_row:row_end, match_col:col_end] = (
+        eco_mask[:row_end - match_row, :col_end - match_col] > 0
+    )
+    logger.info(
+        "[geo] clutter_mask: %d píxeles de eco fijo enmascarados",
+        int(np.count_nonzero(clutter_mask)),
+    )
+
+    # ── 9. Generar GeoTIFF final en memoria, sin ecos fijos ───────────────────
+    # FIX BUG 2: Se aplica la clutter_mask ANTES de escribir el GeoTIFF.
+    # Los píxeles de eco fijo (montaña/terreno) se ponen a 0 (NoData) para
+    # que el raster exportado muestre únicamente precipitación real.
+    # El array original filled_rgb NO se modifica (se trabaja sobre una copia),
+    # para no afectar el template matching ni el cálculo de métricas del orquestador.
+    export_rgb = filled_rgb.copy()
+    export_rgb[clutter_mask] = 0
+    logger.info("[geo] GeoTIFF exportado con ecos fijos enmascarados (NoData=0)")
+
+    geotiff_bytes = array_to_geotiff_bytes(export_rgb, corrected_transform, ref_crs)
 
     return GeoResultado(
         geotiff_bytes=geotiff_bytes,
@@ -327,4 +360,5 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
         score_match=score,
         delta_lon=delta_lon,
         delta_lat=delta_lat,
+        clutter_mask=clutter_mask,
     )

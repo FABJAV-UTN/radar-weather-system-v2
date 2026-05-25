@@ -14,6 +14,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum as SQLEnum,
+    Float,
     Integer,
     LargeBinary,
     Numeric,
@@ -142,6 +143,9 @@ class MetricaProcesamiento(Base):
     # ── Error porcentual ─────────────────────────────────────────────────────
     error_relleno_pct: Mapped[float] = mapped_column(Numeric(5, 2), default=0.00)
 
+    # ── dBZ máximo real (extraído del dbz_map del pipeline) ──────────────────
+    dbz_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     procesado_en: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
@@ -194,10 +198,10 @@ class Usuario(Base):
     email: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     rol: Mapped[RolUsuario] = mapped_column(
-    SQLEnum(RolUsuario, name="enum_rol_usuario", values_callable=lambda x: [e.value for e in x]),
-    nullable=False,
-    default=RolUsuario.VISUALIZADOR,
-)
+        SQLEnum(RolUsuario, name="enum_rol_usuario", values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=RolUsuario.VISUALIZADOR,
+    )
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     ultimo_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -256,6 +256,7 @@ class MetricaProcesamientoRepository:
         pixeles_rellenados: int,
         pixeles_perdidos: int,
         error_relleno_pct: float,
+        dbz_max: float | None = None,
     ) -> MetricaProcesamiento:
         """
         Persiste las métricas de calidad del pipeline.
@@ -267,6 +268,7 @@ class MetricaProcesamientoRepository:
             pixeles_rellenados: Píxeles recuperados por inpainting.
             pixeles_perdidos: Píxeles originales que no se pudieron recuperar.
             error_relleno_pct: Porcentaje de error (perdidos / originales).
+            dbz_max: Valor dBZ máximo real extraído del dbz_map del pipeline.
         """
         metrica = MetricaProcesamiento(
             imagen_id=imagen_id,
@@ -275,6 +277,7 @@ class MetricaProcesamientoRepository:
             pixeles_rellenados=pixeles_rellenados,
             pixeles_perdidos=pixeles_perdidos,
             error_relleno_pct=round(error_relleno_pct, 2),
+            dbz_max=dbz_max,
         )
         self._session.add(metrica)
         await self._session.flush()

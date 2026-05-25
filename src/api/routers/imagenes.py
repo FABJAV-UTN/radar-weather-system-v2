@@ -3,7 +3,7 @@
 Router de imágenes: listado, detalle y descarga de GeoTIFF.
 
 Endpoints:
-- GET  /imagenes                              → Lista paginada
+- GET  /imagenes                              → Lista paginada (incluye dbz_max via JOIN con metricas)
 - GET  /imagenes/descargar-lote?desde=&hasta= → ZIP con GeoTIFFs de un rango de fechas
 - GET  /imagenes/{id}                         → Detalle de una imagen
 - GET  /imagenes/{id}/geotiff                 → Descarga del GeoTIFF final
@@ -16,10 +16,12 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user, get_db
 from src.api.schemas.imagen import ImagenDetalle, ImagenListaResponse, ImagenResumen
+from src.db.models import ImagenRadar, MetricaProcesamiento
 from src.db.repository import ImagenRadarRepository
 
 router = APIRouter(prefix="/imagenes", tags=["imagenes"])
@@ -38,6 +40,7 @@ async def listar_imagenes(
 ) -> ImagenListaResponse:
     """
     Lista imágenes procesadas con filtros opcionales y paginación.
+    Incluye dbz_max via JOIN con metricas_procesamiento.
 
     - **estado**: pendiente | procesando | completado | error
     - **origen**: local | url
@@ -47,11 +50,31 @@ async def listar_imagenes(
     repo = ImagenRadarRepository(db)
     total = await repo.contar(estado=estado, origen=origen)
     items = await repo.listar(estado=estado, origen=origen, limit=limit, offset=offset)
+
+    # Cargar dbz_max para las imágenes de esta página con un JOIN eficiente
+    imagen_ids = [img.id for img in items]
+    dbz_map: dict[int, float | None] = {}
+    if imagen_ids:
+        result = await db.execute(
+            select(MetricaProcesamiento.imagen_id, MetricaProcesamiento.dbz_max).where(
+                MetricaProcesamiento.imagen_id.in_(imagen_ids)
+            )
+        )
+        for row in result.all():
+            dbz_map[row.imagen_id] = row.dbz_max
+
+    # Construir items con dbz_max inyectado
+    items_response = []
+    for img in items:
+        resumen = ImagenResumen.model_validate(img)
+        resumen.dbz_max = dbz_map.get(img.id)
+        items_response.append(resumen)
+
     return ImagenListaResponse(
         total=total,
         limit=limit,
         offset=offset,
-        items=[ImagenResumen.model_validate(i) for i in items],
+        items=items_response,
     )
 
 
@@ -114,7 +137,19 @@ async def obtener_imagen(
     imagen = await repo.obtener_por_id(imagen_id)
     if imagen is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Imagen no encontrada.")
-    return ImagenDetalle.model_validate(imagen)
+
+    detalle = ImagenDetalle.model_validate(imagen)
+
+    # Inyectar dbz_max desde metricas
+    result = await db.execute(
+        select(MetricaProcesamiento.dbz_max).where(
+            MetricaProcesamiento.imagen_id == imagen_id
+        )
+    )
+    row = result.scalar_one_or_none()
+    detalle.dbz_max = row
+
+    return detalle
 
 
 # ── Descarga individual ────────────────────────────────────────────────────────

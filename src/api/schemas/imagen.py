@@ -21,6 +21,7 @@ class ImagenResumen(BaseModel):
     crs: str | None = None
     fecha_procesamiento: datetime | None = None
     created_at: datetime
+    dbz_max: float | None = None
 
 
 class ImagenDetalle(ImagenResumen):

@@ -55,6 +55,7 @@ class MetricasPipeline:
     tiene_marco: bool = False
     score_match: float = 0.0
     geo: GeoResultado | None = None
+    dbz_max: float | None = None
 
 
 @dataclass
@@ -76,9 +77,18 @@ def _calcular_metricas(
     clean_rgb: np.ndarray,
     filled_rgb: np.ndarray,
     dbz_map: np.ndarray,
-) -> dict[str, int | float]:
+    clutter_mask: np.ndarray | None = None,
+) -> dict[str, int | float | None]:
     """
     Calcula métricas de calidad comparando imagen limpia vs rellenada.
+
+    Args:
+        clean_rgb: Array (H, W, 3) uint8. Imagen limpia post-fase 4.
+        filled_rgb: Array (H, W, 3) uint8. Imagen rellenada post-fase 5.
+        dbz_map: Array (H, W) int32. Valor dBZ por píxel (0 = no tormenta).
+        clutter_mask: Array booleano (H, W). True donde hay ecos fijos
+                      (montañas, terreno). Si se provee, esos píxeles se
+                      excluyen del cálculo de dbz_max para no inflar el valor.
     """
     originales = int(np.count_nonzero(dbz_map))
     limpios = int(np.count_nonzero(np.any(clean_rgb > 0, axis=2)))
@@ -87,12 +97,22 @@ def _calcular_metricas(
     perdidos = max(0, originales - limpios)
     error_pct = round((perdidos / originales * 100) if originales > 0 else 0.0, 2)
 
+    # ── dBZ máximo excluyendo ecos fijos ──────────────────────────────────────
+    if clutter_mask is not None and clutter_mask.shape == dbz_map.shape:
+        dbz_sin_clutter = dbz_map.copy()
+        dbz_sin_clutter[clutter_mask] = 0
+    else:
+        dbz_sin_clutter = dbz_map
+
+    dbz_max = float(np.max(dbz_sin_clutter)) if np.any(dbz_sin_clutter > 0) else None
+
     return {
         "pixeles_originales": originales,
         "pixeles_limpios": limpios,
         "pixeles_rellenados": rellenados,
         "pixeles_perdidos": perdidos,
         "error_relleno_pct": error_pct,
+        "dbz_max": dbz_max,
     }
 
 
@@ -113,7 +133,7 @@ async def _verificar_cancelacion(request=None):
 async def ejecutar_pipeline_local(
     file_path: Path,
     session: AsyncSession,
-    request=None,  # ← NUEVO: para detectar cancelación
+    request=None,
 ) -> ResultadoPipeline:
     """
     Ejecuta el pipeline completo para un archivo local (Ruta A).
@@ -143,14 +163,14 @@ async def ejecutar_pipeline_local(
         img_repo=img_repo,
         paso_repo=paso_repo,
         metrica_repo=metrica_repo,
-        request=request,  # ← NUEVO
+        request=request,
     )
 
 
 async def ejecutar_pipeline_url(
     session: AsyncSession,
     url: str | None = None,
-    request=None,  # ← NUEVO: para detectar cancelación
+    request=None,
 ) -> ResultadoPipeline:
     """
     Ejecuta el pipeline completo para la descarga desde URL DACC (Ruta B).
@@ -189,7 +209,7 @@ async def ejecutar_pipeline_url(
         img_repo=img_repo,
         paso_repo=paso_repo,
         metrica_repo=metrica_repo,
-        request=request,  # ← NUEVO
+        request=request,
     )
 
 
@@ -200,7 +220,7 @@ async def _ejecutar_fases_comunes(
     img_repo: ImagenRadarRepository,
     paso_repo: ProcesamentoPasoRepository,
     metrica_repo: MetricaProcesamientoRepository,
-    request=None,  # ← NUEVO
+    request=None,
 ) -> ResultadoPipeline:
     """
     Fases 2-7 comunes a ambas rutas de ingesta.
@@ -210,7 +230,6 @@ async def _ejecutar_fases_comunes(
 
     try:
         # ── Fase 2: Detección de marco ────────────────────────────────────────
-        # Usar to_thread para no bloquear el event loop
         tiene_marco = await asyncio.to_thread(detectar_marco, pil_image)
         metricas.tiene_marco = tiene_marco
         logger.info("[img=%d] Fase 2 — tiene_marco=%s", imagen_id, tiene_marco)
@@ -243,21 +262,28 @@ async def _ejecutar_fases_comunes(
         await paso_repo.registrar(imagen_id, "relleno")
         await _verificar_cancelacion(request)
 
-        # ── Calcular métricas de calidad ──────────────────────────────────────
-        stats = _calcular_metricas(clean_rgb, filled_rgb, dbz_map)
+        # ── Fase 6: Geolocalización ───────────────────────────────────────────
+        # IMPORTANTE: geolocalizar() ahora devuelve clutter_mask (ecos fijos)
+        # que usamos para excluir montañas/terreno del cálculo de dbz_max.
+        geo = await asyncio.to_thread(geolocalizar, filled_rgb)
+        metricas.geo = geo
+        metricas.score_match = geo.score_match
+        logger.info("[img=%d] Fase 6 — geo ok, score=%.4f, clutter_px=%d",
+                    imagen_id, geo.score_match,
+                    int(np.count_nonzero(geo.clutter_mask)) if geo.clutter_mask is not None else 0)
+        await paso_repo.registrar(imagen_id, "geolocalizacion")
+        await _verificar_cancelacion(request)
+
+        # ── Calcular métricas de calidad (con clutter_mask de la geo) ─────────
+        # Se calcula DESPUÉS de la geo para poder excluir ecos fijos del dbz_max.
+        stats = _calcular_metricas(clean_rgb, filled_rgb, dbz_map, clutter_mask=geo.clutter_mask)
         metricas.pixeles_originales = stats["pixeles_originales"]
         metricas.pixeles_limpios = stats["pixeles_limpios"]
         metricas.pixeles_rellenados = stats["pixeles_rellenados"]
         metricas.pixeles_perdidos = stats["pixeles_perdidos"]
         metricas.error_relleno_pct = stats["error_relleno_pct"]
-
-        # ── Fase 6: Geolocalización ───────────────────────────────────────────
-        geo = await asyncio.to_thread(geolocalizar, filled_rgb)
-        metricas.geo = geo
-        metricas.score_match = geo.score_match
-        logger.info("[img=%d] Fase 6 — geo ok, score=%.4f", imagen_id, geo.score_match)
-        await paso_repo.registrar(imagen_id, "geolocalizacion")
-        await _verificar_cancelacion(request)
+        metricas.dbz_max = stats["dbz_max"]
+        logger.info("[img=%d] dbz_max (sin ecos fijos)=%.1f", imagen_id, metricas.dbz_max or 0)
 
         # ── Fase 7: Persistencia ──────────────────────────────────────────────
         await img_repo.actualizar_completado(
@@ -278,6 +304,7 @@ async def _ejecutar_fases_comunes(
             pixeles_rellenados=metricas.pixeles_rellenados,
             pixeles_perdidos=metricas.pixeles_perdidos,
             error_relleno_pct=metricas.error_relleno_pct,
+            dbz_max=metricas.dbz_max,
         )
         logger.info("[img=%d] Fase 7 — persistido con éxito", imagen_id)
 
@@ -289,7 +316,7 @@ async def _ejecutar_fases_comunes(
         await paso_repo.registrar(
             imagen_id, "limpieza", exitoso=False, mensaje_error="Cancelado por el cliente"
         )
-        raise  # Re-lanzar para que el router maneje el 499
+        raise
 
     except Exception as exc:
         logger.exception("[img=%d] Error en pipeline: %s", imagen_id, exc)

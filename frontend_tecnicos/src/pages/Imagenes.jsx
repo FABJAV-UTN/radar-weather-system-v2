@@ -1,25 +1,43 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 
-// Mapa de colores dBZ → descripción legible
+// Rangos de dBZ que corresponden exactamente al DBZ_COLOR_MAP del proyecto.
+// El pipeline clasifica píxeles en niveles 10-80 dBZ.
+// El dbz_max es el valor máximo real extraído del dbz_map.
+//
+// FIX BUG 1: Rangos corregidos con límites inclusivos (min <= dbz_max <= max).
+// - Se elimina el fallback trucho a DBZ_NIVELES[1].
+// - Tormenta extrema cubre >= 65 dBZ (incluye exactamente 65).
+// - Los rangos no se solapan ni dejan gaps entre sí.
+// - Los grises del DACC (70, 80 dBZ) quedan dentro de "Tormenta extrema"
+//   que ya es la categoría más alta, consistente con la paleta oficial.
 const DBZ_NIVELES = [
-  { min: 0,  max: 15,  label: '< 15',  desc: 'Sin lluvia',      color: 'bg-gray-100 text-gray-500' },
-  { min: 15, max: 25,  label: '15–25', desc: 'Llovizna',        color: 'bg-blue-100 text-blue-600' },
-  { min: 25, max: 35,  label: '25–35', desc: 'Lluvia leve',     color: 'bg-cyan-100 text-cyan-700' },
-  { min: 35, max: 45,  label: '35–45', desc: 'Lluvia moderada', color: 'bg-yellow-100 text-yellow-700' },
-  { min: 45, max: 55,  label: '45–55', desc: 'Lluvia intensa',  color: 'bg-orange-100 text-orange-700' },
-  { min: 55, max: 999, label: '> 55',  desc: 'Tormenta severa', color: 'bg-red-100 text-red-700' },
+  //  min  max  (ambos extremos inclusivos: min <= dbz <= max)
+  { min: 65, max: Infinity, label: '≥ 65',  desc: 'Tormenta extrema',  color: 'bg-purple-100 text-purple-700' },
+  { min: 51, max: 64,       label: '51–64', desc: 'Tormenta severa',   color: 'bg-red-100 text-red-700'       },
+  { min: 35, max: 50,       label: '35–50', desc: 'Lluvia intensa',    color: 'bg-orange-100 text-orange-700' },
+  { min: 20, max: 34,       label: '20–34', desc: 'Lluvia moderada',   color: 'bg-yellow-100 text-yellow-700' },
+  { min: 10, max: 19,       label: '10–19', desc: 'Lluvia débil',      color: 'bg-blue-100 text-blue-600'     },
 ];
 
-function getDbzNivel(pixeles_originales, pixeles_limpios) {
-  if (!pixeles_originales || pixeles_originales === 0) return null;
-  const densidad = pixeles_limpios / pixeles_originales;
-  if (densidad > 0.8) return DBZ_NIVELES[5];
-  if (densidad > 0.6) return DBZ_NIVELES[4];
-  if (densidad > 0.4) return DBZ_NIVELES[3];
-  if (densidad > 0.2) return DBZ_NIVELES[2];
-  if (densidad > 0.05) return DBZ_NIVELES[1];
-  return DBZ_NIVELES[0];
+/**
+ * Clasifica un valor dbz_max en el nivel meteorológico correspondiente.
+ *
+ * Los rangos son contiguos e inclusivos en ambos extremos, de mayor a menor
+ * severidad, lo que garantiza que cualquier valor >= 10 caiga en exactamente
+ * un nivel sin necesidad de fallback.
+ *
+ * @param {number|null} dbz_max  Valor máximo de dBZ de la imagen.
+ * @returns {object|null}        Objeto nivel o null si no hay dato.
+ */
+function getDbzNivel(dbz_max) {
+  if (dbz_max == null || dbz_max < 10) return null;
+  for (const nivel of DBZ_NIVELES) {
+    if (dbz_max >= nivel.min && dbz_max <= nivel.max) return nivel;
+  }
+  // No debería llegarse aquí con los rangos actuales,
+  // pero si ocurre (valor < 10 ya filtrado arriba) retornamos null limpiamente.
+  return null;
 }
 
 const ESTADO_BADGE = {
@@ -49,7 +67,6 @@ function haceUnaSemana() {
 export function Imagenes() {
   // ── Estado de datos ──────────────────────────────────────────────────────
   const [imagenes, setImagenes]   = useState([]);
-  const [metricas, setMetricas]   = useState({});
   const [total, setTotal]         = useState(0);
   const [loading, setLoading]     = useState(true);
   const [descargando, setDescargando] = useState(null);
@@ -77,23 +94,11 @@ export function Imagenes() {
     setLoading(true);
     try {
       const offset = (pagina - 1) * porPagina;
+      // El endpoint ya incluye dbz_max via JOIN con metricas_procesamiento
       const data = await api.listarImagenes({ ...filtro, limit: porPagina, offset });
       const items = data.items || [];
       setImagenes(items);
       setTotal(data.total ?? items.length);
-
-      // Métricas en paralelo, solo para completadas de esta página
-      const completadas = items.filter(i => i.estado === 'completado');
-      const metricasMap = {};
-      await Promise.allSettled(
-        completadas.map(async (img) => {
-          try {
-            const m = await api.obtenerMetricas(img.id);
-            metricasMap[img.id] = m;
-          } catch { /* silencioso */ }
-        })
-      );
-      setMetricas(metricasMap);
     } catch (err) {
       console.error(err);
     } finally {
@@ -132,10 +137,7 @@ export function Imagenes() {
       case 'fecha':  va = new Date(a.fecha_hora);  vb = new Date(b.fecha_hora);  break;
       case 'origen': va = a.origen;                vb = b.origen;                break;
       case 'estado': va = a.estado;                vb = b.estado;                break;
-      case 'dbz':
-        va = metricas[a.id]?.pixeles_limpios || 0;
-        vb = metricas[b.id]?.pixeles_limpios || 0;
-        break;
+      case 'dbz':    va = a.dbz_max || 0;          vb = b.dbz_max || 0;          break;
       default: va = a.id; vb = b.id;
     }
     if (va < vb) return sortDir === 'asc' ? -1 : 1;
@@ -183,6 +185,51 @@ export function Imagenes() {
       {children}
       <SortIcon col={col} sortCol={sortCol} sortDir={sortDir} />
     </th>
+  );
+
+  // ── Componente de paginación (reutilizable arriba y abajo) ─────────────────
+  const ControlesPaginacion = () => (
+    <div className="card p-3 flex flex-wrap items-center justify-between gap-3">
+      {/* Selector por página */}
+      <div className="flex items-center gap-2 text-sm text-gray-600">
+        <span>Mostrar</span>
+        {[50, 100, 200].map(n => (
+          <button
+            key={n}
+            onClick={() => handlePorPagina(n)}
+            className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
+              porPagina === n
+                ? 'bg-celeste text-white border-celeste'
+                : 'border-gray-200 hover:border-celeste hover:text-celeste'
+            }`}
+          >
+            {n}
+          </button>
+        ))}
+        <span>por página</span>
+      </div>
+
+      {/* Página X de Y + botones */}
+      <div className="flex items-center gap-2 text-sm">
+        <button
+          onClick={() => setPagina(p => Math.max(1, p - 1))}
+          disabled={pagina === 1}
+          className="btn btn-outline py-1 px-3 disabled:opacity-40"
+        >
+          ← Anterior
+        </button>
+        <span className="text-gray-600 whitespace-nowrap">
+          Página <strong>{pagina}</strong> de <strong>{totalPaginas}</strong>
+        </span>
+        <button
+          onClick={() => setPagina(p => Math.min(totalPaginas, p + 1))}
+          disabled={pagina === totalPaginas}
+          className="btn btn-outline py-1 px-3 disabled:opacity-40"
+        >
+          Siguiente →
+        </button>
+      </div>
+    </div>
   );
 
   return (
@@ -275,6 +322,9 @@ export function Imagenes() {
         </div>
       )}
 
+      {/* ── Controles de paginación ARRIBA (entre filtros y tabla) ── */}
+      {!loading && total > 0 && <ControlesPaginacion />}
+
       {/* ── Tabla ── */}
       <div className="card overflow-hidden">
         {loading ? (
@@ -302,8 +352,7 @@ export function Imagenes() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {imagenesSorted.map((img) => {
-                  const m = metricas[img.id];
-                  const dbz = m ? getDbzNivel(m.pixeles_originales, m.pixeles_limpios) : null;
+                  const dbz = getDbzNivel(img.dbz_max);
                   const tieneGeotiff = img.estado === 'completado';
 
                   return (
@@ -334,7 +383,9 @@ export function Imagenes() {
                       <td className="px-3 md:px-6 py-4">
                         {dbz ? (
                           <div>
-                            <span className={`badge ${dbz.color}`}>{dbz.label} dBZ</span>
+                            <span className={`badge ${dbz.color}`}>
+                              {img.dbz_max != null ? `${Math.round(img.dbz_max)} dBZ` : dbz.label}
+                            </span>
                             <p className="text-xs text-gray-400 mt-0.5 hidden sm:block">{dbz.desc}</p>
                           </div>
                         ) : (
@@ -368,51 +419,6 @@ export function Imagenes() {
           </div>
         )}
       </div>
-
-      {/* ── Controles de paginación ── */}
-      {!loading && total > 0 && (
-        <div className="card p-3 flex flex-wrap items-center justify-between gap-3">
-          {/* Selector por página */}
-          <div className="flex items-center gap-2 text-sm text-gray-600">
-            <span>Mostrar</span>
-            {[50, 100, 200].map(n => (
-              <button
-                key={n}
-                onClick={() => handlePorPagina(n)}
-                className={`px-2 py-1 rounded text-xs font-medium border transition-colors ${
-                  porPagina === n
-                    ? 'bg-celeste text-white border-celeste'
-                    : 'border-gray-200 hover:border-celeste hover:text-celeste'
-                }`}
-              >
-                {n}
-              </button>
-            ))}
-            <span>por página</span>
-          </div>
-
-          {/* Página X de Y + botones */}
-          <div className="flex items-center gap-2 text-sm">
-            <button
-              onClick={() => setPagina(p => Math.max(1, p - 1))}
-              disabled={pagina === 1}
-              className="btn btn-outline py-1 px-3 disabled:opacity-40"
-            >
-              ← Anterior
-            </button>
-            <span className="text-gray-600 whitespace-nowrap">
-              Página <strong>{pagina}</strong> de <strong>{totalPaginas}</strong>
-            </span>
-            <button
-              onClick={() => setPagina(p => Math.min(totalPaginas, p + 1))}
-              disabled={pagina === totalPaginas}
-              className="btn btn-outline py-1 px-3 disabled:opacity-40"
-            >
-              Siguiente →
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

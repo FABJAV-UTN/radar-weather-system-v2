@@ -31,7 +31,7 @@ export function Login() {
           <div className="w-20 h-20 bg-celeste rounded-2xl mx-auto mb-4 flex items-center justify-center text-4xl shadow-lg">
             📡
           </div>
-          <h1 className="font-display text-3xl font-bold text-white">RADAR DACC</h1>
+          <h1 className="font-display text-3xl font-bold text-white">PROCESAMIENTO RADAR</h1>
           <p className="text-white/60 mt-2 font-body">Sistema de Procesamiento Meteorológico</p>
         </div>
 
@@ -52,7 +52,7 @@ export function Login() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="form-input"
-                placeholder="fabio"
+                placeholder="Usuario"
                 required
               />
             </div>
@@ -83,10 +83,6 @@ export function Login() {
             </button>
           </form>
         </div>
-
-        <p className="text-center text-white/40 text-sm mt-6">
-          Dirección de Atención de Contingencias Climáticas — Mendoza
-        </p>
       </div>
     </div>
   );
