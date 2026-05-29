@@ -259,7 +259,7 @@ function PanelScheduler() {
 
   const cargarEstado = async () => {
     try {
-      const data = await api.schedulerEstado();
+      const data = await api.estadoScheduler();
       setEstado(data);
     } catch (err) {
       console.error('Error al obtener estado del scheduler:', err);
@@ -277,7 +277,7 @@ function PanelScheduler() {
     setError('');
     setLoadingAccion(true);
     try {
-      await api.schedulerStart(urlCustom || null, intervalo);
+      await api.iniciarScheduler(intervalo, urlCustom || null);
       await cargarEstado();
     } catch (err) {
       setError(err.message);
@@ -290,7 +290,7 @@ function PanelScheduler() {
     setError('');
     setLoadingAccion(true);
     try {
-      await api.schedulerStop();
+      await api.detenerScheduler();
       await cargarEstado();
     } catch (err) {
       setError(err.message);
