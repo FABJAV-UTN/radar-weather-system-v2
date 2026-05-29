@@ -13,6 +13,10 @@ Coordina todas las fases en orden:
 
 No escribe nada a disco. Todo se mantiene en memoria (numpy arrays, BytesIO).
 Las métricas de calidad se devuelven al llamador para persistencia.
+
+Lógica de timestamp para imágenes locales:
+- Con marco  → OCR sobre la imagen (timestamp en UTC) → aplica offset UTC-3.
+- Sin marco  → nombre del archivo (ya en hora local) → sin offset.
 """
 from __future__ import annotations
 
@@ -38,6 +42,7 @@ from src.subsistema1.detector_marco import detectar_marco
 from src.subsistema1.geolocalizar import GeoResultado, geolocalizar
 from src.subsistema1.ingestor import IngestaResultado, ingestar_local, ingestar_url
 from src.subsistema1.limpiar import clean_image
+from src.subsistema1.ocr import extract_timestamp
 from src.subsistema1.rellenar import fill_gaps
 
 logger = logging.getLogger(__name__)
@@ -137,6 +142,10 @@ async def ejecutar_pipeline_local(
 ) -> ResultadoPipeline:
     """
     Ejecuta el pipeline completo para un archivo local (Ruta A).
+
+    El timestamp final se determina ANTES de persistir el registro:
+    - Si la imagen tiene marco → OCR (timestamp en UTC) → aplica offset UTC-3.
+    - Si no tiene marco        → nombre de archivo (ya en hora local) → sin offset.
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
@@ -146,12 +155,42 @@ async def ejecutar_pipeline_local(
     ingesta: IngestaResultado = await ingestar_local(file_path)
     await _verificar_cancelacion(request)
 
-    # Verificar duplicado
-    if await img_repo.existe_duplicado(ingesta.fecha_hora, "local"):
-        logger.warning("Duplicado detectado: %s %s", ingesta.fecha_hora, "local")
-        raise ValueError(f"Imagen duplicada para fecha_hora={ingesta.fecha_hora} origen=local")
+    # ── Determinar timestamp correcto ANTES de persistir ─────────────────────
+    # Se detecta el marco aquí para elegir la fuente del timestamp.
+    # La detección se repite en _ejecutar_fases_comunes (Fase 2), pero es
+    # una operación rápida y sin efectos secundarios.
+    tiene_marco_previo = await asyncio.to_thread(detectar_marco, ingesta.imagen_pil)
 
-    imagen = await img_repo.crear(ingesta.fecha_hora, "local", ingesta.raw_bytes)
+    if tiene_marco_previo:
+        # El marco contiene el timestamp en UTC → OCR + offset UTC-3
+        fecha_hora_ocr = await asyncio.to_thread(extract_timestamp, ingesta.imagen_pil)
+        if fecha_hora_ocr is not None:
+            fecha_hora_final = fecha_hora_ocr
+            logger.info(
+                "[pre] Timestamp via OCR (tiene marco): %s → usando OCR",
+                fecha_hora_final,
+            )
+        else:
+            # OCR falló → caer en el nombre del archivo como último recurso
+            fecha_hora_final = ingesta.fecha_hora
+            logger.warning(
+                "[pre] OCR falló en imagen con marco. Usando timestamp del nombre: %s",
+                fecha_hora_final,
+            )
+    else:
+        # Sin marco → el nombre del archivo ya está en hora local, sin offset
+        fecha_hora_final = ingesta.fecha_hora
+        logger.info(
+            "[pre] Timestamp via nombre de archivo (sin marco): %s",
+            fecha_hora_final,
+        )
+
+    # Verificar duplicado con el timestamp correcto
+    if await img_repo.existe_duplicado(fecha_hora_final, "local"):
+        logger.warning("Duplicado detectado: %s local", fecha_hora_final)
+        raise ValueError(f"Imagen duplicada para fecha_hora={fecha_hora_final} origen=local")
+
+    imagen = await img_repo.crear(fecha_hora_final, "local", ingesta.raw_bytes)
     imagen_id = imagen.id
     await img_repo.actualizar_estado(imagen_id, "procesando")
     await _verificar_cancelacion(request)
@@ -174,6 +213,9 @@ async def ejecutar_pipeline_url(
 ) -> ResultadoPipeline:
     """
     Ejecuta el pipeline completo para la descarga desde URL DACC (Ruta B).
+
+    Las imágenes del DACC siempre tienen marco con timestamp en UTC.
+    El OCR en ingestar_url aplica el offset UTC-3 internamente.
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
@@ -263,7 +305,7 @@ async def _ejecutar_fases_comunes(
         await _verificar_cancelacion(request)
 
         # ── Fase 6: Geolocalización ───────────────────────────────────────────
-        # IMPORTANTE: geolocalizar() ahora devuelve clutter_mask (ecos fijos)
+        # IMPORTANTE: geolocalizar() devuelve clutter_mask (ecos fijos)
         # que usamos para excluir montañas/terreno del cálculo de dbz_max.
         geo = await asyncio.to_thread(geolocalizar, filled_rgb)
         metricas.geo = geo

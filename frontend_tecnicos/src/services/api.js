@@ -193,7 +193,7 @@ export const api = {
     const { id, signal, abort } = createController();
     const formData = new FormData();
     archivos.forEach((f) => formData.append('archivos', f));
-    const promise = request('/procesamiento/lote', {
+    const promise = request('/procesamiento/upload-lote', {
       method: 'POST',
       body: formData,
     }, signal);

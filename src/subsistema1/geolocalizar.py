@@ -340,6 +340,9 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
         "[geo] clutter_mask: %d píxeles de eco fijo enmascarados",
         int(np.count_nonzero(clutter_mask)),
     )
+    # Después de la línea 3698 (el logger.info de clutter_mask)
+    logger.info("[geo] eco_mask píxeles activos: %d", int(np.count_nonzero(eco_mask)))
+    logger.info("[geo] export_rgb píxeles a 0 después de mask: %d", int(np.count_nonzero(clutter_mask)))
 
     # ── 9. Generar GeoTIFF final en memoria, sin ecos fijos ───────────────────
     # FIX BUG 2: Se aplica la clutter_mask ANTES de escribir el GeoTIFF.
