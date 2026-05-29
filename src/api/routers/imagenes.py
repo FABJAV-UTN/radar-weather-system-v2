@@ -3,7 +3,7 @@
 Router de imágenes: listado, detalle y descarga de GeoTIFF.
 
 Endpoints:
-- GET  /imagenes                              → Lista paginada (incluye dbz_max via JOIN con metricas)
+- GET  /imagenes                              → Lista paginada con sort server-side
 - GET  /imagenes/descargar-lote?desde=&hasta= → ZIP con GeoTIFFs de un rango de fechas
 - GET  /imagenes/{id}                         → Detalle de una imagen
 - GET  /imagenes/{id}/geotiff                 → Descarga del GeoTIFF final
@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import zipfile
 from datetime import date, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
@@ -26,6 +27,10 @@ from src.db.repository import ImagenRadarRepository
 
 router = APIRouter(prefix="/imagenes", tags=["imagenes"])
 
+# Valores válidos de sort_by aceptados por el endpoint
+_SORT_BY_VALUES = Literal["id", "fecha", "origen", "estado", "dbz"]
+_SORT_DIR_VALUES = Literal["asc", "desc"]
+
 
 # ── Listado paginado ───────────────────────────────────────────────────────────
 
@@ -35,21 +40,38 @@ async def listar_imagenes(
     origen: str | None = Query(default=None, description="Filtrar por origen ('local'|'url')"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    sort_by: _SORT_BY_VALUES = Query(
+        default="fecha",
+        description="Columna de ordenamiento: id | fecha | origen | estado | dbz",
+    ),
+    sort_dir: _SORT_DIR_VALUES = Query(
+        default="desc",
+        description="Dirección: asc | desc",
+    ),
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> ImagenListaResponse:
     """
-    Lista imágenes procesadas con filtros opcionales y paginación.
-    Incluye dbz_max via JOIN con metricas_procesamiento.
+    Lista imágenes procesadas con filtros opcionales, paginación y ordenamiento
+    completamente resuelto en la base de datos (no en el cliente).
 
     - **estado**: pendiente | procesando | completado | error
     - **origen**: local | url
+    - **sort_by**: id | fecha | origen | estado | dbz
+    - **sort_dir**: asc | desc
 
     Devuelve `total` con el conteo real (sin limit/offset) para calcular páginas.
     """
     repo = ImagenRadarRepository(db)
     total = await repo.contar(estado=estado, origen=origen)
-    items = await repo.listar(estado=estado, origen=origen, limit=limit, offset=offset)
+    items = await repo.listar(
+        estado=estado,
+        origen=origen,
+        limit=limit,
+        offset=offset,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
 
     # Cargar dbz_max para las imágenes de esta página con un JOIN eficiente
     imagen_ids = [img.id for img in items]

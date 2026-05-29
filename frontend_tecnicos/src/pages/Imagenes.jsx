@@ -1,18 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 
-// Rangos de dBZ que corresponden exactamente al DBZ_COLOR_MAP del proyecto.
-// El pipeline clasifica píxeles en niveles 10-80 dBZ.
-// El dbz_max es el valor máximo real extraído del dbz_map.
-//
-// FIX BUG 1: Rangos corregidos con límites inclusivos (min <= dbz_max <= max).
-// - Se elimina el fallback trucho a DBZ_NIVELES[1].
-// - Tormenta extrema cubre >= 65 dBZ (incluye exactamente 65).
-// - Los rangos no se solapan ni dejan gaps entre sí.
-// - Los grises del DACC (70, 80 dBZ) quedan dentro de "Tormenta extrema"
-//   que ya es la categoría más alta, consistente con la paleta oficial.
+// Rangos de dBZ — rangos contiguos e inclusivos (fix bug 1 anterior).
 const DBZ_NIVELES = [
-  //  min  max  (ambos extremos inclusivos: min <= dbz <= max)
   { min: 65, max: Infinity, label: '≥ 65',  desc: 'Tormenta extrema',  color: 'bg-purple-100 text-purple-700' },
   { min: 51, max: 64,       label: '51–64', desc: 'Tormenta severa',   color: 'bg-red-100 text-red-700'       },
   { min: 35, max: 50,       label: '35–50', desc: 'Lluvia intensa',    color: 'bg-orange-100 text-orange-700' },
@@ -20,23 +10,11 @@ const DBZ_NIVELES = [
   { min: 10, max: 19,       label: '10–19', desc: 'Lluvia débil',      color: 'bg-blue-100 text-blue-600'     },
 ];
 
-/**
- * Clasifica un valor dbz_max en el nivel meteorológico correspondiente.
- *
- * Los rangos son contiguos e inclusivos en ambos extremos, de mayor a menor
- * severidad, lo que garantiza que cualquier valor >= 10 caiga en exactamente
- * un nivel sin necesidad de fallback.
- *
- * @param {number|null} dbz_max  Valor máximo de dBZ de la imagen.
- * @returns {object|null}        Objeto nivel o null si no hay dato.
- */
 function getDbzNivel(dbz_max) {
   if (dbz_max == null || dbz_max < 10) return null;
   for (const nivel of DBZ_NIVELES) {
     if (dbz_max >= nivel.min && dbz_max <= nivel.max) return nivel;
   }
-  // No debería llegarse aquí con los rangos actuales,
-  // pero si ocurre (valor < 10 ya filtrado arriba) retornamos null limpiamente.
   return null;
 }
 
@@ -52,12 +30,10 @@ function SortIcon({ col, sortCol, sortDir }) {
   return <span className="ml-1 text-celeste">{sortDir === 'asc' ? '↑' : '↓'}</span>;
 }
 
-// Fecha de hoy en formato YYYY-MM-DD para los inputs date
 function hoy() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Fecha de hace 7 días
 function haceUnaSemana() {
   const d = new Date();
   d.setDate(d.getDate() - 7);
@@ -66,21 +42,24 @@ function haceUnaSemana() {
 
 export function Imagenes() {
   // ── Estado de datos ──────────────────────────────────────────────────────
-  const [imagenes, setImagenes]   = useState([]);
-  const [total, setTotal]         = useState(0);
-  const [loading, setLoading]     = useState(true);
+  const [imagenes, setImagenes]       = useState([]);
+  const [total, setTotal]             = useState(0);
+  const [loading, setLoading]         = useState(true);
   const [descargando, setDescargando] = useState(null);
 
   // ── Filtros ──────────────────────────────────────────────────────────────
-  const [filtro, setFiltro]       = useState({ estado: '', origen: '' });
+  const [filtro, setFiltro] = useState({ estado: '', origen: '' });
 
   // ── Paginación ───────────────────────────────────────────────────────────
   const [pagina, setPagina]       = useState(1);
   const [porPagina, setPorPagina] = useState(50);
 
-  // ── Ordenamiento ─────────────────────────────────────────────────────────
-  const [sortCol, setSortCol]     = useState('id');
-  const [sortDir, setSortDir]     = useState('desc');
+  // ── Ordenamiento server-side ──────────────────────────────────────────────
+  // sortCol y sortDir se envían como parámetros al backend en cada request.
+  // El backend ordena TODOS los registros antes de paginar, por lo que el
+  // orden es global (no solo la página visible).
+  const [sortCol, setSortCol] = useState('id');
+  const [sortDir, setSortDir] = useState('desc');
 
   // ── Panel descarga lote ───────────────────────────────────────────────────
   const [mostrarLote, setMostrarLote]         = useState(false);
@@ -90,12 +69,19 @@ export function Imagenes() {
   const [errorLote, setErrorLote]             = useState('');
 
   // ── Carga de datos ────────────────────────────────────────────────────────
+  // sort_by y sort_dir viajan como query params al backend → la DB ordena
+  // el conjunto completo ANTES de aplicar limit/offset.
   const cargarImagenes = useCallback(async () => {
     setLoading(true);
     try {
       const offset = (pagina - 1) * porPagina;
-      // El endpoint ya incluye dbz_max via JOIN con metricas_procesamiento
-      const data = await api.listarImagenes({ ...filtro, limit: porPagina, offset });
+      const data = await api.listarImagenes({
+        ...filtro,
+        limit: porPagina,
+        offset,
+        sort_by:  sortCol,
+        sort_dir: sortDir,
+      });
       const items = data.items || [];
       setImagenes(items);
       setTotal(data.total ?? items.length);
@@ -104,7 +90,7 @@ export function Imagenes() {
     } finally {
       setLoading(false);
     }
-  }, [filtro, pagina, porPagina]);
+  }, [filtro, pagina, porPagina, sortCol, sortDir]);
 
   useEffect(() => {
     cargarImagenes();
@@ -120,7 +106,9 @@ export function Imagenes() {
     setPagina(1);
   };
 
-  // ── Ordenamiento ─────────────────────────────────────────────────────────
+  // ── Ordenamiento ──────────────────────────────────────────────────────────
+  // Al cambiar columna o dirección se vuelve a página 1 para evitar
+  // mostrar una página "en el medio" del nuevo orden.
   const handleSort = (col) => {
     if (sortCol === col) {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -128,22 +116,8 @@ export function Imagenes() {
       setSortCol(col);
       setSortDir('asc');
     }
+    setPagina(1);
   };
-
-  const imagenesSorted = [...imagenes].sort((a, b) => {
-    let va, vb;
-    switch (sortCol) {
-      case 'id':     va = a.id;                    vb = b.id;                    break;
-      case 'fecha':  va = new Date(a.fecha_hora);  vb = new Date(b.fecha_hora);  break;
-      case 'origen': va = a.origen;                vb = b.origen;                break;
-      case 'estado': va = a.estado;                vb = b.estado;                break;
-      case 'dbz':    va = a.dbz_max || 0;          vb = b.dbz_max || 0;          break;
-      default: va = a.id; vb = b.id;
-    }
-    if (va < vb) return sortDir === 'asc' ? -1 : 1;
-    if (va > vb) return sortDir === 'asc' ?  1 : -1;
-    return 0;
-  });
 
   // ── Descarga individual ───────────────────────────────────────────────────
   const handleDescargar = async (img) => {
@@ -187,10 +161,8 @@ export function Imagenes() {
     </th>
   );
 
-  // ── Componente de paginación (reutilizable arriba y abajo) ─────────────────
   const ControlesPaginacion = () => (
     <div className="card p-3 flex flex-wrap items-center justify-between gap-3">
-      {/* Selector por página */}
       <div className="flex items-center gap-2 text-sm text-gray-600">
         <span>Mostrar</span>
         {[50, 100, 200].map(n => (
@@ -209,7 +181,6 @@ export function Imagenes() {
         <span>por página</span>
       </div>
 
-      {/* Página X de Y + botones */}
       <div className="flex items-center gap-2 text-sm">
         <button
           onClick={() => setPagina(p => Math.max(1, p - 1))}
@@ -263,7 +234,6 @@ export function Imagenes() {
           🔄 Actualizar
         </button>
 
-        {/* Botón descarga lote */}
         <button
           onClick={() => { setMostrarLote(v => !v); setErrorLote(''); }}
           className="btn btn-outline w-full sm:w-auto"
@@ -322,7 +292,7 @@ export function Imagenes() {
         </div>
       )}
 
-      {/* ── Controles de paginación ARRIBA (entre filtros y tabla) ── */}
+      {/* ── Controles de paginación ARRIBA ── */}
       {!loading && total > 0 && <ControlesPaginacion />}
 
       {/* ── Tabla ── */}
@@ -351,7 +321,7 @@ export function Imagenes() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {imagenesSorted.map((img) => {
+                {imagenes.map((img) => {
                   const dbz = getDbzNivel(img.dbz_max);
                   const tieneGeotiff = img.estado === 'completado';
 
@@ -419,6 +389,9 @@ export function Imagenes() {
           </div>
         )}
       </div>
+
+      {/* ── Controles de paginación ABAJO ── */}
+      {!loading && total > 0 && <ControlesPaginacion />}
     </div>
   );
 }

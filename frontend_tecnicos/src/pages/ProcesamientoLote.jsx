@@ -3,7 +3,7 @@ import { useLote } from '../context/LoteContext';
 
 export function ProcesamientoLote() {
   const {
-    archivos, resultado, error, loading, procesados,
+    archivos, resultado, error, loading, escaneando, procesados,
     seleccionarArchivos, procesar, cancelar, limpiar,
   } = useLote();
 
@@ -48,21 +48,46 @@ export function ProcesamientoLote() {
         <div className="space-y-4">
           {/* Botones de selección */}
           <div className="flex flex-wrap gap-3">
-            <button onClick={abrirSelectorArchivos} disabled={loading} className="btn btn-outline">
+            <button
+              onClick={abrirSelectorArchivos}
+              disabled={loading || escaneando}
+              className="btn btn-outline"
+            >
               🗂️ Seleccionar archivos
             </button>
-            <button onClick={abrirSelectorCarpeta} disabled={loading} className="btn btn-outline">
+            <button
+              onClick={abrirSelectorCarpeta}
+              disabled={loading || escaneando}
+              className="btn btn-outline"
+            >
               📁 Seleccionar carpeta
             </button>
-            {archivos.length > 0 && !loading && (
+            {archivos.length > 0 && !loading && !escaneando && (
               <button onClick={limpiar} className="btn btn-outline text-gray-400 hover:text-red-500">
                 ✕ Limpiar
               </button>
             )}
           </div>
 
+          {/* Indicador de escaneo */}
+          {escaneando && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="flex items-center gap-3">
+                <span className="animate-spin text-xl">🔍</span>
+                <div>
+                  <p className="text-sm font-medium text-blue-700">
+                    Leyendo archivos de la carpeta...
+                  </p>
+                  <p className="text-xs text-blue-500 mt-0.5">
+                    Esto puede tardar unos segundos si hay muchos archivos.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Archivos seleccionados */}
-          {archivos.length > 0 && (
+          {!escaneando && archivos.length > 0 && (
             <div className="bg-celeste-light border border-celeste/20 rounded-lg p-4">
               <p className="text-sm font-medium text-celeste mb-2">
                 ✅ {archivos.length} archivo{archivos.length !== 1 ? 's' : ''} seleccionado{archivos.length !== 1 ? 's' : ''}
@@ -82,7 +107,7 @@ export function ProcesamientoLote() {
             </div>
           )}
 
-          {/* Progreso en tiempo real mientras carga */}
+          {/* Progreso en tiempo real mientras procesa */}
           {loading && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
@@ -107,7 +132,7 @@ export function ProcesamientoLote() {
           <div className="flex gap-3">
             <button
               onClick={procesar}
-              disabled={loading || !archivos.length}
+              disabled={loading || escaneando || !archivos.length}
               className="btn btn-primary"
             >
               {loading ? (

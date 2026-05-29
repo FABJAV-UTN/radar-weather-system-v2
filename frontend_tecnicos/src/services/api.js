@@ -133,19 +133,20 @@ export const api = {
 
   me: () => request('/auth/me'),
 
-  // Imágenes
+  // Imágenes — sort_by y sort_dir se pasan al backend para ordenamiento server-side
   listarImagenes: (params = {}) => {
     const query = new URLSearchParams();
-    if (params.estado) query.append('estado', params.estado);
-    if (params.origen) query.append('origen', params.origen);
-    if (params.limit) query.append('limit', params.limit);
-    if (params.offset !== undefined) query.append('offset', params.offset);
+    if (params.estado)               query.append('estado',   params.estado);
+    if (params.origen)               query.append('origen',   params.origen);
+    if (params.limit)                query.append('limit',    params.limit);
+    if (params.offset !== undefined) query.append('offset',   params.offset);
+    if (params.sort_by)              query.append('sort_by',  params.sort_by);
+    if (params.sort_dir)             query.append('sort_dir', params.sort_dir);
     return request(`/imagenes?${query.toString()}`);
   },
 
   obtenerImagen: (id) => request(`/imagenes/${id}`),
 
-  // ✅ FIX: usa API_BASE relativa para que pase por el proxy de Vite/nginx
   descargarGeotiff: async (id, filename) => {
     const token = localStorage.getItem('access_token');
     const response = await fetch(`${API_BASE}/imagenes/${id}/geotiff`, {
@@ -178,36 +179,21 @@ export const api = {
     return promise;
   },
 
-  procesarLocal: (filePath) => {
-    const { id, signal, abort } = createController();
-    const promise = request('/procesamiento/local', {
+  procesarLocal: (filePath) =>
+    request('/procesamiento/local', {
       method: 'POST',
       body: JSON.stringify({ file_path: filePath }),
-    }, signal);
-    promise._cancel = abort;
-    promise._id = id;
-    return promise;
-  },
+    }),
 
-  procesarCarpeta: (folderPath) => {
-    const { id, signal, abort } = createController();
-    const promise = request('/procesamiento/carpeta', {
-      method: 'POST',
-      body: JSON.stringify({ folder_path: folderPath }),
-    }, signal);
-    promise._cancel = abort;
-    promise._id = id;
-    return promise;
-  },
+  obtenerMetricas: (id) => request(`/procesamiento/${id}/metricas`),
+  obtenerPasos: (id) => request(`/procesamiento/${id}/pasos`),
 
-  // Procesamiento lote via upload
+  // Procesamiento lote
   procesarUploadLote: (archivos) => {
     const { id, signal, abort } = createController();
     const formData = new FormData();
-    for (const archivo of archivos) {
-      formData.append('archivos', archivo);
-    }
-    const promise = request('/procesamiento/upload-lote', {
+    archivos.forEach((f) => formData.append('archivos', f));
+    const promise = request('/procesamiento/lote', {
       method: 'POST',
       body: formData,
     }, signal);
@@ -216,33 +202,60 @@ export const api = {
     return promise;
   },
 
-  cancelarLote: () =>
-    request('/procesamiento/lote/cancelar', { method: 'POST' }),
-
-  // Scheduler — procesamiento continuo
-  schedulerStart: (url = null, intervalo_segundos = 120) =>
+  // Scheduler
+  iniciarScheduler: (intervalo, url) =>
     request('/procesamiento/scheduler/start', {
       method: 'POST',
-      body: JSON.stringify({ url, intervalo_segundos }),
+      body: JSON.stringify({ intervalo_segundos: intervalo, url: url || null }),
     }),
 
-  schedulerStop: () =>
+  detenerScheduler: () =>
     request('/procesamiento/scheduler/stop', { method: 'POST' }),
 
-  schedulerEstado: () =>
-    request('/procesamiento/scheduler/estado'),
+  estadoScheduler: () => request('/procesamiento/scheduler/estado'),
 
-  // Métricas
-  obtenerMetricas: (imagenId) => request(`/procesamiento/${imagenId}/metricas`),
-  obtenerPasos: (imagenId) => request(`/procesamiento/${imagenId}/pasos`),
+  // Descarga lote ZIP
+  descargarLote: async (desde, hasta) => {
+    const token = localStorage.getItem('access_token');
+    const response = await fetch(
+      `${API_BASE}/imagenes/descargar-lote?desde=${desde}&hasta=${hasta}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new ApiError(data.detail || `Error ${response.status}`, response.status);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `radar_${desde}_${hasta}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  },
 
   // Admin
-  listarUsuarios: () => request('/admin/usuarios'),
-  crearUsuario: (data) => request('/admin/usuarios', { method: 'POST', body: JSON.stringify(data) }),
-  cambiarEstado: (id, activo) => request(`/admin/usuarios/${id}/estado`, {
-    method: 'PATCH',
-    body: JSON.stringify({ activo }),
-  }),
-};
+  listarUsuarios: (params = {}) => {
+    const query = new URLSearchParams();
+    if (params.activo !== undefined) query.append('activo', params.activo);
+    if (params.rol) query.append('rol', params.rol);
+    return request(`/admin/usuarios?${query.toString()}`);
+  },
 
-export { ApiError };
+  crearUsuario: (data) =>
+    request('/admin/usuarios', { method: 'POST', body: JSON.stringify(data) }),
+
+  cambiarRol: (id, rol) =>
+    request(`/admin/usuarios/${id}/rol`, { method: 'PATCH', body: JSON.stringify({ rol }) }),
+
+  cambiarEstado: (id, activo) =>
+    request(`/admin/usuarios/${id}/estado`, { method: 'PATCH', body: JSON.stringify({ activo }) }),
+
+  eliminarUsuario: (id) =>
+    request(`/admin/usuarios/${id}`, { method: 'DELETE' }),
+
+  listarIntentos: (limit = 20) =>
+    request(`/admin/intentos-descarga?limit=${limit}`),
+};

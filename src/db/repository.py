@@ -70,31 +70,71 @@ class ImagenRadarRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    # Columnas ordenables que viven en imagenes_radar
+    _SORT_COLUMNS_DIRECT: dict[str, object] = {
+        "id":     ImagenRadar.id,
+        "fecha":  ImagenRadar.fecha_hora,
+        "origen": ImagenRadar.origen,
+        "estado": ImagenRadar.estado,
+    }
+
     async def listar(
         self,
         estado: str | None = None,
         origen: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        sort_by: str = "fecha",
+        sort_dir: str = "desc",
     ) -> list[ImagenRadar]:
         """
-        Lista imágenes con filtros opcionales.
+        Lista imágenes con filtros opcionales, paginación y ordenamiento
+        completamente resuelto en la base de datos.
 
         Args:
             estado: Filtrar por estado ('pendiente', 'procesando', 'completado', 'error').
             origen: Filtrar por origen ('local', 'url').
             limit: Máximo de registros a devolver.
             offset: Desplazamiento para paginación.
+            sort_by: Columna de orden ('id', 'fecha', 'origen', 'estado', 'dbz').
+            sort_dir: Dirección ('asc' o 'desc').
 
         Returns:
-            Lista de ImagenRadar ordenada por fecha_hora descendente.
+            Lista de ImagenRadar (o Row cuando se ordena por dbz).
         """
-        stmt = select(ImagenRadar)
-        if estado:
-            stmt = stmt.where(ImagenRadar.estado == estado)
-        if origen:
-            stmt = stmt.where(ImagenRadar.origen == origen)
-        stmt = stmt.order_by(ImagenRadar.fecha_hora.desc()).limit(limit).offset(offset)
+        asc = sort_dir.lower() != "desc"
+
+        if sort_by == "dbz":
+            # Ordenar por dbz_max requiere LEFT JOIN con metricas_procesamiento
+            # para acceder a registros sin métrica (dbz_max NULL → van al final).
+            col = MetricaProcesamiento.dbz_max
+            order_expr = col.asc().nulls_last() if asc else col.desc().nulls_last()
+
+            stmt = (
+                select(ImagenRadar)
+                .outerjoin(
+                    MetricaProcesamiento,
+                    MetricaProcesamiento.imagen_id == ImagenRadar.id,
+                )
+            )
+            if estado:
+                stmt = stmt.where(ImagenRadar.estado == estado)
+            if origen:
+                stmt = stmt.where(ImagenRadar.origen == origen)
+            stmt = stmt.order_by(order_expr).limit(limit).offset(offset)
+
+        else:
+            # Columnas directas en imagenes_radar
+            col = self._SORT_COLUMNS_DIRECT.get(sort_by, ImagenRadar.fecha_hora)
+            order_expr = col.asc() if asc else col.desc()
+
+            stmt = select(ImagenRadar)
+            if estado:
+                stmt = stmt.where(ImagenRadar.estado == estado)
+            if origen:
+                stmt = stmt.where(ImagenRadar.origen == origen)
+            stmt = stmt.order_by(order_expr).limit(limit).offset(offset)
+
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
@@ -268,7 +308,10 @@ class MetricaProcesamientoRepository:
             pixeles_rellenados: Píxeles recuperados por inpainting.
             pixeles_perdidos: Píxeles originales que no se pudieron recuperar.
             error_relleno_pct: Porcentaje de error (perdidos / originales).
-            dbz_max: Valor dBZ máximo real extraído del dbz_map del pipeline.
+            dbz_max: Valor dBZ máximo real (excluidos ecos fijos).
+
+        Returns:
+            La instancia persistida.
         """
         metrica = MetricaProcesamiento(
             imagen_id=imagen_id,
@@ -276,7 +319,7 @@ class MetricaProcesamientoRepository:
             pixeles_limpios=pixeles_limpios,
             pixeles_rellenados=pixeles_rellenados,
             pixeles_perdidos=pixeles_perdidos,
-            error_relleno_pct=round(error_relleno_pct, 2),
+            error_relleno_pct=error_relleno_pct,
             dbz_max=dbz_max,
         )
         self._session.add(metrica)
@@ -284,11 +327,9 @@ class MetricaProcesamientoRepository:
         return metrica
 
     async def obtener_por_imagen(self, imagen_id: int) -> MetricaProcesamiento | None:
-        """Devuelve las métricas de una imagen específica."""
+        """Devuelve las métricas de una imagen por su ID."""
         result = await self._session.execute(
-            select(MetricaProcesamiento).where(
-                MetricaProcesamiento.imagen_id == imagen_id
-            )
+            select(MetricaProcesamiento).where(MetricaProcesamiento.imagen_id == imagen_id)
         )
         return result.scalar_one_or_none()
 
@@ -307,30 +348,27 @@ class IntentoDescargaRepository:
         self,
         url: str,
         exitoso: bool,
-        intento_numero: int = 1,
         motivo_fallo: str | None = None,
     ) -> IntentoDescarga:
-        """
-        Registra un intento de descarga desde la URL del DACC (Ruta B).
+        """Registra un intento de descarga desde la URL DACC."""
+        # Contar intentos previos para esta URL
+        count_result = await self._session.execute(
+            select(func.count()).select_from(IntentoDescarga).where(IntentoDescarga.url == url)
+        )
+        numero = (count_result.scalar_one() or 0) + 1
 
-        Args:
-            url: URL de la que se intentó descargar.
-            exitoso: True si la descarga fue exitosa.
-            intento_numero: Número de intento (para reintentos).
-            motivo_fallo: Causa del fallo ('red', 'ocr_invalido', 'timeout', etc.).
-        """
         intento = IntentoDescarga(
             url=url,
             exitoso=exitoso,
-            intento_numero=intento_numero,
             motivo_fallo=motivo_fallo,
+            intento_numero=numero,
         )
         self._session.add(intento)
         await self._session.flush()
         return intento
 
     async def listar_recientes(self, limit: int = 20) -> list[IntentoDescarga]:
-        """Devuelve los intentos de descarga más recientes."""
+        """Devuelve los intentos más recientes, ordenados por fecha descendente."""
         result = await self._session.execute(
             select(IntentoDescarga)
             .order_by(IntentoDescarga.fecha_intento.desc())
@@ -354,20 +392,9 @@ class UsuarioRepository:
         username: str,
         email: str,
         password_hash: str,
-        rol: RolUsuario = RolUsuario.VISUALIZADOR,
+        rol: RolUsuario,
     ) -> Usuario:
-        """
-        Crea un nuevo usuario en el sistema.
-
-        Args:
-            username: Nombre de usuario único.
-            email: Correo electrónico único.
-            password_hash: Hash de la contraseña (debe generarse con una librería como bcrypt).
-            rol: Rol del usuario (admin, operador, visualizador).
-
-        Returns:
-            La instancia del usuario persistida con el id asignado.
-        """
+        """Crea un nuevo usuario activo."""
         usuario = Usuario(
             username=username,
             email=email,
@@ -380,21 +407,21 @@ class UsuarioRepository:
         return usuario
 
     async def obtener_por_id(self, usuario_id: int) -> Usuario | None:
-        """Recupera un usuario por su id primario."""
+        """Recupera un usuario por su ID."""
         result = await self._session.execute(
             select(Usuario).where(Usuario.id == usuario_id)
         )
         return result.scalar_one_or_none()
 
     async def obtener_por_username(self, username: str) -> Usuario | None:
-        """Recupera un usuario por su nombre de usuario."""
+        """Recupera un usuario por su username."""
         result = await self._session.execute(
             select(Usuario).where(Usuario.username == username)
         )
         return result.scalar_one_or_none()
 
     async def obtener_por_email(self, email: str) -> Usuario | None:
-        """Recupera un usuario por su correo electrónico."""
+        """Recupera un usuario por su email."""
         result = await self._session.execute(
             select(Usuario).where(Usuario.email == email)
         )
@@ -407,55 +434,39 @@ class UsuarioRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> list[Usuario]:
-        """
-        Lista usuarios con filtros opcionales.
-
-        Args:
-            activo: Filtrar por estado activo/inactivo.
-            rol: Filtrar por rol (admin, operador, visualizador).
-            limit: Máximo de registros a devolver.
-            offset: Desplazamiento para paginación.
-
-        Returns:
-            Lista de Usuario ordenada por username ascendente.
-        """
+        """Lista usuarios con filtros opcionales."""
         stmt = select(Usuario)
         if activo is not None:
             stmt = stmt.where(Usuario.activo == activo)
-        if rol:
+        if rol is not None:
             stmt = stmt.where(Usuario.rol == rol)
         stmt = stmt.order_by(Usuario.username.asc()).limit(limit).offset(offset)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def actualizar_password(self, usuario_id: int, password_hash: str) -> None:
-        """Actualiza la contraseña hasheada de un usuario."""
+    async def cambiar_rol(self, usuario_id: int, rol: RolUsuario) -> None:
+        """Cambia el rol de un usuario."""
         await self._session.execute(
-            update(Usuario)
-            .where(Usuario.id == usuario_id)
-            .values(password_hash=password_hash)
+            update(Usuario).where(Usuario.id == usuario_id).values(rol=rol)
+        )
+
+    async def cambiar_estado(self, usuario_id: int, activo: bool) -> None:
+        """Activa o desactiva un usuario."""
+        await self._session.execute(
+            update(Usuario).where(Usuario.id == usuario_id).values(activo=activo)
         )
 
     async def actualizar_ultimo_login(self, usuario_id: int) -> None:
-        """Registra el último login de un usuario."""
+        """Registra la fecha/hora del último login exitoso."""
         await self._session.execute(
             update(Usuario)
             .where(Usuario.id == usuario_id)
             .values(ultimo_login=datetime.utcnow())
         )
 
-    async def cambiar_estado(self, usuario_id: int, activo: bool) -> None:
-        """Activa o desactiva un usuario."""
+    async def eliminar(self, usuario_id: int) -> None:
+        """Elimina un usuario del sistema."""
+        from sqlalchemy import delete
         await self._session.execute(
-            update(Usuario)
-            .where(Usuario.id == usuario_id)
-            .values(activo=activo)
-        )
-
-    async def cambiar_rol(self, usuario_id: int, rol: RolUsuario) -> None:
-        """Cambia el rol de un usuario."""
-        await self._session.execute(
-            update(Usuario)
-            .where(Usuario.id == usuario_id)
-            .values(rol=rol)
+            delete(Usuario).where(Usuario.id == usuario_id)
         )
