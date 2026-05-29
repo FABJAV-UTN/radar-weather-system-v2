@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { api, cancelRequest } from '../services/api';
 
 // ── Panel: Procesamiento único (URL o archivo local) ──────────────────────────
-
+//checkpoint
 function PanelUnico() {
   const [modo, setModo] = useState('url');
   const [url, setUrl] = useState('');
