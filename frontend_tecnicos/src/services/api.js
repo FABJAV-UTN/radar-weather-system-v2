@@ -126,6 +126,9 @@ function createController() {
 
 // ── API Export ────────────────────────────────────────────────────────────
 
+/** Archivos por request en upload-lote (carpetas grandes: 100k+ en el cliente, 1000 por subida). */
+export const UPLOAD_LOTE_TAMANO = 1000;
+
 export const api = {
   // Auth
   login: (username, password) =>
@@ -179,16 +182,37 @@ export const api = {
     return promise;
   },
 
-  procesarLocal: (filePath) =>
-    request('/procesamiento/local', {
+  procesarLocal: (filePath) => {
+    const { id, signal, abort } = createController();
+    const promise = request('/procesamiento/local', {
       method: 'POST',
       body: JSON.stringify({ file_path: filePath }),
-    }),
+    }, signal);
+    promise._cancel = abort;
+    promise._id = id;
+    return promise;
+  },
+
+  procesarUploadUnico: (archivo) => {
+    const { id, signal, abort } = createController();
+    const formData = new FormData();
+    formData.append('archivo', archivo);
+    const promise = request('/procesamiento/upload', {
+      method: 'POST',
+      body: formData,
+    }, signal);
+    promise._cancel = abort;
+    promise._id = id;
+    return promise;
+  },
 
   obtenerMetricas: (id) => request(`/procesamiento/${id}/metricas`),
   obtenerPasos: (id) => request(`/procesamiento/${id}/pasos`),
 
-  // Procesamiento lote
+  iniciarLote: () =>
+    request('/procesamiento/lote/iniciar', { method: 'POST' }),
+
+  // Procesamiento lote (el frontend envía como máximo UPLOAD_LOTE_TAMANO archivos por request)
   procesarUploadLote: (archivos) => {
     const { id, signal, abort } = createController();
     const formData = new FormData();

@@ -7,6 +7,8 @@ function PanelUnico() {
   const [modo, setModo] = useState('url');
   const [url, setUrl] = useState('');
   const [filePath, setFilePath] = useState('');
+  const [archivoLocal, setArchivoLocal] = useState(null);
+  const [localSubmodo, setLocalSubmodo] = useState('subir');
   const [resultado, setResultado] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -33,8 +35,11 @@ function PanelUnico() {
       if (modo === 'url') {
         addLog('Iniciando descarga desde URL DACC...', 'info');
         promise = api.procesarUrl(url || undefined);
+      } else if (localSubmodo === 'subir') {
+        addLog(`Subiendo archivo: ${archivoLocal.name}`, 'info');
+        promise = api.procesarUploadUnico(archivoLocal);
       } else {
-        addLog(`Procesando archivo local: ${filePath}`, 'info');
+        addLog(`Procesando archivo en servidor: ${filePath}`, 'info');
         promise = api.procesarLocal(filePath);
       }
 
@@ -71,7 +76,9 @@ function PanelUnico() {
     <div className="space-y-4">
       <div className="card p-6">
         <h3 className="font-display text-lg font-bold text-gray-800 mb-1">⚡ Procesamiento único</h3>
-        <p className="text-sm text-gray-500 mb-5">Ejecuta el pipeline una sola vez desde la URL del DACC o un archivo del servidor.</p>
+        <p className="text-sm text-gray-500 mb-5">
+          Ejecuta el pipeline una sola vez desde la URL del DACC o subiendo un archivo .gif/.png.
+        </p>
 
         {/* Selector de modo */}
         <div className="flex gap-2 mb-5">
@@ -97,25 +104,72 @@ function PanelUnico() {
             />
           </div>
         ) : (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Ruta absoluta al archivo en el servidor
-            </label>
-            <input
-              type="text"
-              value={filePath}
-              onChange={(e) => setFilePath(e.target.value)}
-              className="form-input"
-              placeholder="/app/data/radar_20260524_143000.gif"
-            />
-            <p className="text-xs text-gray-400 mt-1">Formato: radar_YYYYMMDD_HHMMSS.gif</p>
+          <div className="space-y-4">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setLocalSubmodo('subir')}
+                className={`btn text-sm ${localSubmodo === 'subir' ? 'btn-primary' : 'btn-outline'}`}
+              >
+                📤 Subir archivo
+              </button>
+              <button
+                type="button"
+                onClick={() => setLocalSubmodo('ruta')}
+                className={`btn text-sm ${localSubmodo === 'ruta' ? 'btn-primary' : 'btn-outline'}`}
+              >
+                🖥️ Ruta en servidor
+              </button>
+            </div>
+
+            {localSubmodo === 'subir' ? (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Archivo .gif o .png desde tu computadora
+                </label>
+                <input
+                  type="file"
+                  accept=".gif,.png"
+                  onChange={(e) => {
+                    setArchivoLocal(e.target.files?.[0] || null);
+                    e.target.value = '';
+                  }}
+                  className="form-input file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:bg-celeste file:text-white file:cursor-pointer"
+                />
+                {archivoLocal && (
+                  <p className="text-xs text-gray-500 mt-2">
+                    Seleccionado: <span className="font-mono">{archivoLocal.name}</span>
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Ruta absoluta al archivo dentro del contenedor backend
+                </label>
+                <input
+                  type="text"
+                  value={filePath}
+                  onChange={(e) => setFilePath(e.target.value)}
+                  className="form-input"
+                  placeholder="/app/data/radar_20260524_143000.gif"
+                />
+                <p className="text-xs text-gray-400 mt-1">
+                  Solo para archivos que ya están en el servidor (Docker), no en tu PC.
+                </p>
+              </div>
+            )}
           </div>
         )}
 
         <div className="flex gap-3 mt-5">
           <button
             onClick={handleProcesar}
-            disabled={loading || (modo === 'local' && !filePath)}
+            disabled={
+              loading
+              || (modo === 'local' && localSubmodo === 'subir' && !archivoLocal)
+              || (modo === 'local' && localSubmodo === 'ruta' && !filePath)
+            }
             className="btn btn-primary"
           >
             {loading

@@ -43,9 +43,31 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "uv run --no-dev python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
     networks:
       - radar-net
-    command: ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uv",
+        "run",
+        "--no-dev",
+        "uvicorn",
+        "src.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+      ]
 
   # ── Frontend React (DESARROLLO con hot reload) ──────────────────────────
   frontend:
@@ -63,7 +85,8 @@ services:
       - ./frontend_tecnicos/tailwind.config.js:/app/tailwind.config.js   # ← agregar
       - ./frontend_tecnicos/postcss.config.js:/app/postcss.config.js     # ← agregar
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - radar-net
 

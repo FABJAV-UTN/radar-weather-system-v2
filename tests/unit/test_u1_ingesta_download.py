@@ -56,12 +56,7 @@ class TestIngestaU1:
         mock_response.status_code = 200
         mock_response.raise_for_status = MagicMock()
 
-        mock_ts = datetime(2026, 1, 30, 11, 14, 55)  # ya en hora local
-
-        with (
-            patch("src.subsistema1.ingestor.httpx.AsyncClient") as mock_client_cls,
-            patch("src.subsistema1.ingestor.extract_timestamp", return_value=mock_ts),
-        ):
+        with patch("src.subsistema1.ingestor.httpx.AsyncClient") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -74,8 +69,8 @@ class TestIngestaU1:
         assert len(resultado.raw_bytes) > 0
         assert resultado.raw_bytes[:3] == b"GIF"
         assert resultado.origen == "url"
-        assert resultado.fecha_hora == mock_ts
-        print(f"[U1] Descarga OK — {len(resultado.raw_bytes)} bytes — ts={resultado.fecha_hora}")
+        assert resultado.fecha_hora is None  # latest.gif; el orquestador resuelve vía marco/OCR
+        print(f"[U1] Descarga OK — {len(resultado.raw_bytes)} bytes")
 
     @pytest.mark.asyncio
     async def test_u1_timeout_lanza_excepcion(self):
@@ -93,28 +88,6 @@ class TestIngestaU1:
                 await ingestar_url()
 
     @pytest.mark.asyncio
-    async def test_u1_ocr_invalido_lanza_value_error(self):
-        """U1: Si OCR no extrae timestamp, lanza ValueError con mensaje claro."""
-        gif_bytes = _gif_bytes_minimo()
-
-        mock_response = MagicMock()
-        mock_response.content = gif_bytes
-        mock_response.raise_for_status = MagicMock()
-
-        with (
-            patch("src.subsistema1.ingestor.httpx.AsyncClient") as mock_client_cls,
-            patch("src.subsistema1.ingestor.extract_timestamp", return_value=None),
-        ):
-            mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client_cls.return_value = mock_client
-
-            with pytest.raises(ValueError, match="OCR no pudo extraer"):
-                await ingestar_url()
-
-    @pytest.mark.asyncio
     async def test_u1_ingestar_local_extrae_timestamp_de_nombre(self, tmp_path):
         """U1 Ruta A: Lee archivo local y extrae timestamp correcto del nombre."""
         gif_bytes = _gif_bytes_minimo()
@@ -125,8 +98,7 @@ class TestIngestaU1:
 
         assert isinstance(resultado, IngestaResultado)
         assert resultado.origen == "local"
-        # UTC -3: 15:14 → 12:14
-        assert resultado.fecha_hora.hour == 12
+        assert resultado.fecha_hora.hour == 15
         assert resultado.fecha_hora.minute == 14
         assert resultado.fecha_hora.day == 30
         print(f"[U1-A] Local OK — ts={resultado.fecha_hora}")
@@ -194,20 +166,38 @@ class TestHelpersIngestor:
     def test_extraer_timestamp_formato_estandar(self):
         """Extrae timestamp de nombre con formato radar_YYYYMMDD_HHMMSS."""
         resultado = _extraer_timestamp_de_nombre("radar_20260523_143000.gif")
-        # UTC-3: 14:30 → 11:30
         assert resultado is not None
         assert resultado.year == 2026
         assert resultado.month == 5
         assert resultado.day == 23
-        assert resultado.hour == 11
+        assert resultado.hour == 14
         assert resultado.minute == 30
 
     def test_extraer_timestamp_formato_alternativo(self):
         """Extrae timestamp de nombre con formato YYYYMMDD_HHMM_SS."""
         resultado = _extraer_timestamp_de_nombre("radar_20260130_1514_55.gif")
         assert resultado is not None
-        assert resultado.hour == 12  # 15 - 3
+        assert resultado.hour == 15
         assert resultado.minute == 14
+        assert resultado.second == 55
+
+    def test_extraer_timestamp_con_guiones_ano_primero(self):
+        """Acepta YYYY-MM-DD_HHMM sin prefijo de lugar (Mendoza implícito)."""
+        resultado = _extraer_timestamp_de_nombre("2020-09-05_0000.gif")
+        assert resultado is not None
+        assert resultado == datetime(2020, 9, 5, 0, 0, 0)
+
+    def test_extraer_timestamp_con_guiones_dia_primero(self):
+        """Acepta DD-MM-YYYY_HHMM (año al final del trío)."""
+        resultado = _extraer_timestamp_de_nombre("05-09-2020_0000.gif")
+        assert resultado is not None
+        assert resultado == datetime(2020, 9, 5, 0, 0, 0)
+
+    def test_ubicacion_default_mendoza_sin_texto(self):
+        from src.subsistema1.ingestor import _ubicacion_desde_nombre
+
+        assert _ubicacion_desde_nombre("2020-09-05_0000") == "mendoza"
+        assert _ubicacion_desde_nombre("radar_20260523_143000") == "radar"
 
     def test_extraer_timestamp_nombre_invalido(self):
         """Retorna None para nombres que no contienen timestamp."""

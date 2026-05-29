@@ -14,7 +14,18 @@ export function useAuth() {
     try {
       const data = await api.me();
       setUser(data);
-    } catch {
+    } catch (err) {
+      // Si el backend aún arranca (proxy 500), reintentar una vez antes de cerrar sesión
+      if (err?.status >= 500) {
+        await new Promise((r) => setTimeout(r, 2500));
+        try {
+          const data = await api.me();
+          setUser(data);
+          return;
+        } catch {
+          // cae al logout
+        }
+      }
       logout();
     } finally {
       setLoading(false);

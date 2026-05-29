@@ -5,8 +5,8 @@ Fase 1 del pipeline: Adquisición de datos.
 Dos rutas de ingesta:
 - Ruta A (local): Lee archivo PNG/GIF de disco, extrae timestamp del nombre del archivo.
   El nombre del archivo ya contiene hora local (sin UTC offset) → no se aplica conversión.
-- Ruta B (URL DACC): Descarga latest.gif, extrae timestamp via OCR.
-  El timestamp del marco está en UTC → OCR aplica offset UTC-3.
+- Ruta B (URL DACC): Descarga la imagen; el orquestador resuelve el timestamp
+  (marco → OCR UTC-3, o nombre en la URL si no hay marco).
 
 Sin persistencia directa: devuelve los bytes crudos y el timestamp al orquestador,
 que decide si hay duplicado antes de crear el registro en base de datos.
@@ -23,15 +23,12 @@ import httpx
 from PIL import Image
 
 from src.config import settings
-from src.subsistema1.ocr import extract_timestamp
-
 logger = logging.getLogger(__name__)
 
-# Patrón de nombre de archivo: radar_YYYYMMDD_HHMMSS.gif
-# Ej: radar_20260130_1514_55.gif o radar_20260523_143000.gif
-_FILENAME_PATTERN = re.compile(
-    r"(?:radar_)?(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(?:_(\d{2}))?"
-)
+_YEAR_MIN = 1990
+_YEAR_MAX = 2100
+_UBICACION_DEFAULT = "mendoza"
+_PREFIJO_UBICACION_RE = re.compile(r"^([a-zA-Z]+)")
 
 
 class IngestaResultado:
@@ -42,7 +39,7 @@ class IngestaResultado:
     def __init__(
         self,
         raw_bytes: bytes,
-        fecha_hora: datetime,
+        fecha_hora: datetime | None,
         origen: str,
         imagen_pil: Image.Image,
     ) -> None:
@@ -57,33 +54,127 @@ def _apply_timezone_offset(dt: datetime) -> datetime:
     return dt + timedelta(hours=settings.radar_timezone_offset_hours)
 
 
+def _es_anio(valor: int) -> bool:
+    return _YEAR_MIN <= valor <= _YEAR_MAX
+
+
+def _ubicacion_desde_nombre(stem: str) -> str:
+    """
+    Prefijo alfabético del archivo (lugar). Si el nombre empieza con dígitos,
+    no incluye lugar → Mendoza por defecto.
+    """
+    match = _PREFIJO_UBICACION_RE.match(stem)
+    if match:
+        return match.group(1).lower().rstrip("_")
+    return _UBICACION_DEFAULT
+
+
+def _parsear_hora_desde_partes(partes: list[str], desde: int) -> tuple[int, int, int] | None:
+    """Interpreta HHMM, HHMMSS o HH + MM + SS en partes[desde:]."""
+    if desde >= len(partes):
+        return 0, 0, 0
+
+    token = partes[desde]
+    if len(token) == 6 and token.isdigit():
+        return int(token[0:2]), int(token[2:4]), int(token[4:6])
+    if len(token) == 4 and token.isdigit():
+        if (
+            desde + 1 < len(partes)
+            and len(partes[desde + 1]) <= 2
+            and partes[desde + 1].isdigit()
+        ):
+            return int(token[0:2]), int(token[2:4]), int(partes[desde + 1])
+        return int(token[0:2]), int(token[2:4]), 0
+    return None
+
+
+def _fecha_desde_bloque_ocho(token: str) -> tuple[int, int, int] | None:
+    if len(token) != 8 or not token.isdigit():
+        return None
+    year, month, day = int(token[0:4]), int(token[4:6]), int(token[6:8])
+    if not _es_anio(year) or not (1 <= month <= 12) or not (1 <= day <= 31):
+        return None
+    return year, month, day
+
+
+def _fecha_desde_partes(partes: list[str], indice_anio: int) -> tuple[int, int, int, int] | None:
+    """
+    A partir de un grupo de 4 dígitos = año, resuelve mes/día.
+
+    - Año al inicio del trío: YYYY, MM, DD
+    - Año al final del trío: DD, MM, YYYY
+
+    Returns:
+        (year, month, day, indice_siguiente_hora) o None.
+    """
+    year = int(partes[indice_anio])
+    if not _es_anio(year):
+        return None
+
+    # YYYY-MM-DD (o YYYY-M-D por grupos separados)
+    if indice_anio + 2 < len(partes):
+        month, day = int(partes[indice_anio + 1]), int(partes[indice_anio + 2])
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return year, month, day, indice_anio + 3
+
+    # DD-MM-YYYY
+    if indice_anio >= 2:
+        day, month = int(partes[indice_anio - 2]), int(partes[indice_anio - 1])
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return year, month, day, indice_anio + 1
+
+    return None
+
+
 def _extraer_timestamp_de_nombre(filename: str) -> datetime | None:
     """
     Extrae fecha/hora del nombre de archivo.
 
-    Formato esperado: radar_YYYYMMDD_HHMMSS.gif
-    También acepta: radar_YYYYMMDD_HHMM_SS.gif
+    Busca secuencias numéricas: un bloque de 4 dígitos es el año; los siguientes
+  (o anteriores) son mes y día. Soporta:
 
-    El nombre de archivo ya contiene hora local (UTC-3). No se aplica ningún
-    offset: el dato se devuelve tal cual está en el nombre.
+    - ``radar_20260523_143000.gif`` (YYYYMMDD + HHMMSS)
+    - ``2020-09-05_0000.gif`` (YYYY-MM-DD + HHMM)
+    - ``05-09-2020_0000.gif`` (DD-MM-YYYY + HHMM)
+    - Sin prefijo de lugar → se asume ubicación ``mendoza``
+
+    La hora del nombre es hora local; no se aplica offset UTC.
 
     Args:
         filename: Nombre del archivo (sin ruta).
 
     Returns:
-        datetime en hora local (tal como figura en el nombre), o None si no
-        coincide el patrón.
+        datetime en hora local, o None si no hay fecha válida.
     """
-    m = _FILENAME_PATTERN.search(filename)
-    if not m:
+    stem = Path(filename).stem
+    partes = re.findall(r"\d+", stem)
+    if not partes:
         return None
-    year, month, day, hour, minute = (int(m.group(i)) for i in range(1, 6))
-    second = int(m.group(6)) if m.group(6) else 0
-    try:
-        # Sin offset: el nombre del archivo ya está en hora local
-        return datetime(year, month, day, hour, minute, second)
-    except ValueError:
-        return None
+
+    candidatos: list[tuple[int, int, int, int]] = []
+
+    for i, token in enumerate(partes):
+        bloque = _fecha_desde_bloque_ocho(token)
+        if bloque:
+            year, month, day = bloque
+            candidatos.append((year, month, day, i + 1))
+            continue
+        if len(token) == 4 and token.isdigit() and _es_anio(int(token)):
+            parsed = _fecha_desde_partes(partes, i)
+            if parsed:
+                candidatos.append(parsed)
+
+    for year, month, day, hora_desde in candidatos:
+        hora = _parsear_hora_desde_partes(partes, hora_desde)
+        if hora is None:
+            continue
+        hour, minute, second = hora
+        try:
+            return datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            continue
+
+    return None
 
 
 async def ingestar_local(file_path: Path) -> IngestaResultado:
@@ -115,10 +206,16 @@ async def ingestar_local(file_path: Path) -> IngestaResultado:
     if fecha_hora is None:
         raise ValueError(
             f"No se pudo extraer timestamp del nombre '{file_path.name}'. "
-            f"Formato esperado: radar_YYYYMMDD_HHMMSS.gif"
+            f"Se esperan grupos numéricos con año (4 dígitos), mes, día y hora."
         )
 
-    logger.info("Ingestado local: %s → %s (hora local, sin offset)", file_path.name, fecha_hora)
+    ubicacion = _ubicacion_desde_nombre(file_path.stem)
+    logger.info(
+        "Ingestado local [%s]: %s → %s (hora local, sin offset)",
+        ubicacion,
+        file_path.name,
+        fecha_hora,
+    )
     return IngestaResultado(
         raw_bytes=raw_bytes,
         fecha_hora=fecha_hora,
@@ -129,21 +226,23 @@ async def ingestar_local(file_path: Path) -> IngestaResultado:
 
 async def ingestar_url(url: str | None = None) -> IngestaResultado:
     """
-    Ruta B: Descarga latest.gif desde la URL del DACC y extrae timestamp via OCR.
+    Ruta B: Descarga la imagen desde la URL del DACC.
 
-    Las imágenes del DACC siempre tienen marco con timestamp en UTC.
-    El OCR aplica el offset UTC-3 internamente.
+    El timestamp definitivo lo resuelve el orquestador (marco → OCR UTC-3;
+    sin marco → nombre del archivo en la URL, si aplica).
 
     Args:
         url: URL de descarga. Si None, usa settings.radar_url.
 
     Returns:
-        IngestaResultado con raw_bytes, fecha_hora (UTC-3) y origen='url'.
+        IngestaResultado con raw_bytes y origen='url'. ``fecha_hora`` puede ser
+        None si el nombre en la URL no trae fecha (ej. latest.gif).
 
     Raises:
         httpx.HTTPError: Si falla la descarga.
-        ValueError: Si el OCR no puede extraer un timestamp válido.
     """
+    from urllib.parse import urlparse
+
     target_url = url or settings.radar_url
 
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
@@ -153,15 +252,15 @@ async def ingestar_url(url: str | None = None) -> IngestaResultado:
         raw_bytes = response.content
 
     imagen = Image.open(io.BytesIO(raw_bytes))
+    nombre_url = Path(urlparse(target_url).path).name or "latest.gif"
+    fecha_hora = _extraer_timestamp_de_nombre(nombre_url)
 
-    # Extraer timestamp via OCR (aplica offset UTC-3 internamente)
-    fecha_hora = extract_timestamp(imagen)
-    if fecha_hora is None:
-        raise ValueError(
-            f"OCR no pudo extraer timestamp válido desde {target_url}"
-        )
-
-    logger.info("Ingestado URL: %s → %s", target_url, fecha_hora)
+    logger.info(
+        "Descargado URL: %s (%d bytes), timestamp nombre=%s",
+        target_url,
+        len(raw_bytes),
+        fecha_hora,
+    )
     return IngestaResultado(
         raw_bytes=raw_bytes,
         fecha_hora=fecha_hora,

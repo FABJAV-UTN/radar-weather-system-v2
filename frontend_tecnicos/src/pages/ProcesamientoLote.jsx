@@ -3,26 +3,57 @@ import { useLote } from '../context/LoteContext';
 
 export function ProcesamientoLote() {
   const {
-    archivos, resultado, error, loading, escaneando, procesados,
-    seleccionarArchivos, procesar, cancelar, limpiar,
+    cantidadArchivos,
+    previewNombres,
+    resultado,
+    error,
+    loading,
+    cargandoArchivos,
+    procesados,
+    loteActual,
+    lotesTotal,
+    soportaCarpetaModerna,
+    cargarCarpeta,
+    seleccionarArchivos,
+    procesar,
+    cancelar,
+    limpiar,
   } = useLote();
 
   const inputRef = useRef(null);
 
   const handleSeleccion = (e) => {
-    seleccionarArchivos(e.target.files);
+    const files = e.target.files;
+    seleccionarArchivos(files);
     e.target.value = '';
   };
 
   const abrirSelectorArchivos = () => {
-    inputRef.current.removeAttribute('webkitdirectory');
-    inputRef.current.click();
+    const input = inputRef.current;
+    input.removeAttribute('webkitdirectory');
+    input.click();
   };
 
-  const abrirSelectorCarpeta = () => {
-    inputRef.current.setAttribute('webkitdirectory', '');
-    inputRef.current.click();
+  const abrirSelectorCarpetaLegacy = () => {
+    const input = inputRef.current;
+    input.setAttribute('webkitdirectory', '');
+    input.click();
   };
+
+  const abrirSelectorCarpeta = async () => {
+    if (soportaCarpetaModerna) {
+      try {
+        const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+        await cargarCarpeta(dirHandle);
+        return;
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
+    abrirSelectorCarpetaLegacy();
+  };
+
+  const ocupado = loading || cargandoArchivos;
 
   return (
     <div className="space-y-6 max-w-4xl">
@@ -33,7 +64,7 @@ export function ProcesamientoLote() {
         <p className="text-sm text-gray-500 mb-6">
           Seleccioná archivos <code className="bg-gray-100 px-1 rounded">.gif</code> o{' '}
           <code className="bg-gray-100 px-1 rounded">.png</code> desde tu computadora.
-          Se suben al servidor y se procesan secuencialmente.
+          Se suben al servidor en tandas de hasta 1.000 y se procesan secuencialmente.
         </p>
 
         <input
@@ -46,80 +77,84 @@ export function ProcesamientoLote() {
         />
 
         <div className="space-y-4">
-          {/* Botones de selección */}
           <div className="flex flex-wrap gap-3">
             <button
               onClick={abrirSelectorArchivos}
-              disabled={loading || escaneando}
+              disabled={ocupado}
               className="btn btn-outline"
             >
               🗂️ Seleccionar archivos
             </button>
             <button
               onClick={abrirSelectorCarpeta}
-              disabled={loading || escaneando}
+              disabled={ocupado}
               className="btn btn-outline"
             >
               📁 Seleccionar carpeta
             </button>
-            {archivos.length > 0 && !loading && !escaneando && (
+            {cantidadArchivos > 0 && !ocupado && (
               <button onClick={limpiar} className="btn btn-outline text-gray-400 hover:text-red-500">
                 ✕ Limpiar
               </button>
             )}
           </div>
 
-          {/* Indicador de escaneo */}
-          {escaneando && (
+          {cargandoArchivos && (
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <div className="flex items-center gap-3">
-                <span className="animate-spin text-xl">🔍</span>
+                <span className="animate-spin text-xl">⏳</span>
                 <div>
-                  <p className="text-sm font-medium text-blue-700">
-                    Leyendo archivos de la carpeta...
-                  </p>
+                  <p className="text-sm font-medium text-blue-700">Cargando archivos...</p>
                   <p className="text-xs text-blue-500 mt-0.5">
-                    Esto puede tardar unos segundos si hay muchos archivos.
+                    Preparando la lista después de confirmar en el navegador.
                   </p>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Archivos seleccionados */}
-          {!escaneando && archivos.length > 0 && (
+          {!cargandoArchivos && cantidadArchivos > 0 && (
             <div className="bg-celeste-light border border-celeste/20 rounded-lg p-4">
               <p className="text-sm font-medium text-celeste mb-2">
-                ✅ {archivos.length} archivo{archivos.length !== 1 ? 's' : ''} seleccionado{archivos.length !== 1 ? 's' : ''}
+                ✅ {cantidadArchivos.toLocaleString()} archivo{cantidadArchivos !== 1 ? 's' : ''}{' '}
+                .gif / .png listo{cantidadArchivos !== 1 ? 's' : ''} para procesar
               </p>
-              {archivos.length <= 10 && (
+              {cantidadArchivos <= 10 && previewNombres.length > 0 && (
                 <ul className="text-xs text-gray-500 space-y-0.5 max-h-32 overflow-auto">
-                  {archivos.map((f, i) => (
-                    <li key={i} className="font-mono">{f.name}</li>
+                  {previewNombres.map((nombre, i) => (
+                    <li key={i} className="font-mono">{nombre}</li>
                   ))}
                 </ul>
               )}
-              {archivos.length > 10 && (
+              {cantidadArchivos > 10 && previewNombres.length > 0 && (
                 <p className="text-xs text-gray-400 mt-1">
-                  {archivos.slice(0, 5).map(f => f.name).join(', ')} ... y {archivos.length - 5} más
+                  {previewNombres.join(', ')}
+                  {cantidadArchivos > previewNombres.length &&
+                    ` ... y ${(cantidadArchivos - previewNombres.length).toLocaleString()} más`}
                 </p>
               )}
             </div>
           )}
 
-          {/* Progreso en tiempo real mientras procesa */}
           {loading && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <span className="animate-spin text-xl">⏳</span>
                 <p className="text-sm font-medium text-amber-700">
-                  Procesando lote... {procesados > 0 && `(${procesados} completados)`}
+                  Procesando...
+                  {lotesTotal > 0 && loteActual > 0 && ` tanda ${loteActual}/${lotesTotal}`}
+                  {procesados > 0 &&
+                    ` — ${procesados.toLocaleString()} / ${cantidadArchivos.toLocaleString()} archivos`}
                 </p>
               </div>
               <div className="w-full bg-amber-100 rounded-full h-2">
                 <div
                   className="bg-amber-400 h-2 rounded-full transition-all duration-500"
-                  style={{ width: archivos.length > 0 ? `${Math.min((procesados / archivos.length) * 100, 95)}%` : '10%' }}
+                  style={{
+                    width: cantidadArchivos > 0
+                      ? `${Math.min((procesados / cantidadArchivos) * 100, 95)}%`
+                      : '10%',
+                  }}
                 />
               </div>
               <p className="text-xs text-amber-600 mt-2">
@@ -128,17 +163,16 @@ export function ProcesamientoLote() {
             </div>
           )}
 
-          {/* Botones de acción */}
           <div className="flex gap-3">
             <button
               onClick={procesar}
-              disabled={loading || escaneando || !archivos.length}
+              disabled={ocupado || !cantidadArchivos}
               className="btn btn-primary"
             >
               {loading ? (
                 <><span className="animate-spin inline-block">⏳</span> Procesando...</>
               ) : (
-                <>▶️ Procesar {archivos.length > 0 ? `(${archivos.length})` : ''}</>
+                <>▶️ Procesar {cantidadArchivos > 0 ? `(${cantidadArchivos.toLocaleString()})` : ''}</>
               )}
             </button>
             {loading && (
@@ -150,12 +184,17 @@ export function ProcesamientoLote() {
         </div>
       </div>
 
-      {/* Resultado */}
       {resultado && (
         <div className="card p-6">
           <h3 className="font-display text-lg font-bold text-gray-800 mb-4">
-            {resultado.cancelado ? '⚠️ Procesamiento parcial' : '✅ Lote completado'}
+            {resultado.cancelado ? '⚠️ Procesamiento cancelado' : '✅ Lote completado'}
           </h3>
+
+          {resultado.cancelado && (
+            <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-4">
+              Detuviste el lote. Los archivos que no se procesaron no se cuentan como errores.
+            </p>
+          )}
 
           <div className="grid grid-cols-3 gap-4 mb-6">
             <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-100 text-center">
@@ -207,7 +246,6 @@ export function ProcesamientoLote() {
         </div>
       )}
 
-      {/* Error */}
       {error && !resultado && (
         <div className="card p-6 border-red-200 bg-red-50">
           <p className="text-red-600 text-sm">{error}</p>

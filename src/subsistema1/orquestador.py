@@ -14,9 +14,9 @@ Coordina todas las fases en orden:
 No escribe nada a disco. Todo se mantiene en memoria (numpy arrays, BytesIO).
 Las métricas de calidad se devuelven al llamador para persistencia.
 
-Lógica de timestamp para imágenes locales:
-- Con marco  → OCR sobre la imagen (timestamp en UTC) → aplica offset UTC-3.
-- Sin marco  → nombre del archivo (ya en hora local) → sin offset.
+Lógica de timestamp (local y URL, igual):
+- Con marco DACC → OCR del marco (UTC) y offset UTC-3.
+- Sin marco → nombre del archivo (hora local, sin offset); sin OCR posible.
 """
 from __future__ import annotations
 
@@ -135,6 +135,48 @@ async def _verificar_cancelacion(request=None):
         raise PipelineCanceladoError("El cliente canceló la petición")
 
 
+async def _resolver_timestamp(
+    pil_image: Image.Image,
+    fecha_hora_archivo: datetime | None,
+    etiqueta: str,
+) -> datetime:
+    """
+    Define fecha/hora antes de persistir (local y URL).
+
+    1. Detectar marco.
+    2. Con marco → OCR (UTC en imagen) + offset UTC-3.
+    3. Sin marco (o OCR fallido) → timestamp del nombre de archivo (sin offset).
+    """
+    tiene_marco = await asyncio.to_thread(detectar_marco, pil_image)
+
+    if tiene_marco:
+        fecha_ocr = await asyncio.to_thread(extract_timestamp, pil_image)
+        if fecha_ocr is not None:
+            logger.info(
+                "[pre][%s] Timestamp via OCR (marco, UTC→local): %s",
+                etiqueta,
+                fecha_ocr,
+            )
+            return fecha_ocr
+        logger.warning(
+            "[pre][%s] Marco detectado pero OCR falló; usando nombre de archivo",
+            etiqueta,
+        )
+
+    if fecha_hora_archivo is not None:
+        logger.info(
+            "[pre][%s] Timestamp via nombre de archivo (sin offset): %s",
+            etiqueta,
+            fecha_hora_archivo,
+        )
+        return fecha_hora_archivo
+
+    raise ValueError(
+        f"No se pudo determinar fecha/hora ({etiqueta}): "
+        "sin marco legible por OCR y el nombre del archivo no incluye timestamp válido."
+    )
+
+
 async def ejecutar_pipeline_local(
     file_path: Path,
     session: AsyncSession,
@@ -143,9 +185,7 @@ async def ejecutar_pipeline_local(
     """
     Ejecuta el pipeline completo para un archivo local (Ruta A).
 
-    El timestamp final se determina ANTES de persistir el registro:
-    - Si la imagen tiene marco → OCR (timestamp en UTC) → aplica offset UTC-3.
-    - Si no tiene marco        → nombre de archivo (ya en hora local) → sin offset.
+    Timestamp: marco → OCR (UTC-3); sin marco → nombre del archivo (hora local).
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
@@ -155,35 +195,11 @@ async def ejecutar_pipeline_local(
     ingesta: IngestaResultado = await ingestar_local(file_path)
     await _verificar_cancelacion(request)
 
-    # ── Determinar timestamp correcto ANTES de persistir ─────────────────────
-    # Se detecta el marco aquí para elegir la fuente del timestamp.
-    # La detección se repite en _ejecutar_fases_comunes (Fase 2), pero es
-    # una operación rápida y sin efectos secundarios.
-    tiene_marco_previo = await asyncio.to_thread(detectar_marco, ingesta.imagen_pil)
-
-    if tiene_marco_previo:
-        # El marco contiene el timestamp en UTC → OCR + offset UTC-3
-        fecha_hora_ocr = await asyncio.to_thread(extract_timestamp, ingesta.imagen_pil)
-        if fecha_hora_ocr is not None:
-            fecha_hora_final = fecha_hora_ocr
-            logger.info(
-                "[pre] Timestamp via OCR (tiene marco): %s → usando OCR",
-                fecha_hora_final,
-            )
-        else:
-            # OCR falló → caer en el nombre del archivo como último recurso
-            fecha_hora_final = ingesta.fecha_hora
-            logger.warning(
-                "[pre] OCR falló en imagen con marco. Usando timestamp del nombre: %s",
-                fecha_hora_final,
-            )
-    else:
-        # Sin marco → el nombre del archivo ya está en hora local, sin offset
-        fecha_hora_final = ingesta.fecha_hora
-        logger.info(
-            "[pre] Timestamp via nombre de archivo (sin marco): %s",
-            fecha_hora_final,
-        )
+    fecha_hora_final = await _resolver_timestamp(
+        ingesta.imagen_pil,
+        ingesta.fecha_hora,
+        "local",
+    )
 
     # Verificar duplicado con el timestamp correcto
     if await img_repo.existe_duplicado(fecha_hora_final, "local"):
@@ -214,8 +230,7 @@ async def ejecutar_pipeline_url(
     """
     Ejecuta el pipeline completo para la descarga desde URL DACC (Ruta B).
 
-    Las imágenes del DACC siempre tienen marco con timestamp en UTC.
-    El OCR en ingestar_url aplica el offset UTC-3 internamente.
+    Timestamp: marco → OCR (UTC-3); sin marco → nombre en la URL si aplica.
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
@@ -234,12 +249,17 @@ async def ejecutar_pipeline_url(
 
     await _verificar_cancelacion(request)
 
-    # Verificar duplicado
-    if await img_repo.existe_duplicado(ingesta.fecha_hora, "url"):
-        logger.warning("Duplicado URL detectado: %s", ingesta.fecha_hora)
-        raise ValueError(f"Imagen duplicada para fecha_hora={ingesta.fecha_hora} origen=url")
+    fecha_hora_final = await _resolver_timestamp(
+        ingesta.imagen_pil,
+        ingesta.fecha_hora,
+        "url",
+    )
 
-    imagen = await img_repo.crear(ingesta.fecha_hora, "url", ingesta.raw_bytes)
+    if await img_repo.existe_duplicado(fecha_hora_final, "url"):
+        logger.warning("Duplicado URL detectado: %s", fecha_hora_final)
+        raise ValueError(f"Imagen duplicada para fecha_hora={fecha_hora_final} origen=url")
+
+    imagen = await img_repo.crear(fecha_hora_final, "url", ingesta.raw_bytes)
     imagen_id = imagen.id
     await img_repo.actualizar_estado(imagen_id, "procesando")
     await _verificar_cancelacion(request)

@@ -5,9 +5,11 @@ Router de procesamiento: ejecución del pipeline y consulta de métricas.
 Endpoints:
 - POST /procesamiento/url              → Ejecutar pipeline una vez desde URL DACC
 - POST /procesamiento/local            → Ejecutar pipeline desde archivo local
+- POST /procesamiento/upload           → Subir un archivo .gif/.png y procesarlo
 - POST /procesamiento/carpeta          → Procesar lote desde carpeta del servidor
 - POST /procesamiento/upload-lote      → Procesar lote via upload desde el cliente
-- POST /procesamiento/lote/cancelar    → Setear flag de cancelación del lote activo  ← NUEVO
+- POST /procesamiento/lote/iniciar      → Resetear flag de cancelación (inicio de lote)
+- POST /procesamiento/lote/cancelar    → Setear flag de cancelación del lote activo
 - POST /procesamiento/scheduler/start  → Iniciar procesamiento continuo desde URL
 - POST /procesamiento/scheduler/stop   → Detener procesamiento continuo
 - GET  /procesamiento/scheduler/estado → Estado del scheduler
@@ -59,6 +61,10 @@ def _reset_cancelacion() -> None:
 
 def _lote_fue_cancelado() -> bool:
     return _lote_cancelado
+
+
+async def _lote_debe_detenerse(http_request: Request) -> bool:
+    return _lote_fue_cancelado() or await http_request.is_disconnected()
 
 
 # ── Schemas del scheduler ─────────────────────────────────────────────────────
@@ -153,6 +159,62 @@ async def procesar_desde_local(
     )
 
 
+def _respuesta_pipeline(resultado) -> PipelineResponse:
+    m = resultado.metricas
+    return PipelineResponse(
+        imagen_id=resultado.imagen_id,
+        exito=resultado.exito,
+        mensaje_error=resultado.mensaje_error,
+        pixeles_originales=m.pixeles_originales,
+        pixeles_limpios=m.pixeles_limpios,
+        pixeles_rellenados=m.pixeles_rellenados,
+        pixeles_perdidos=m.pixeles_perdidos,
+        error_relleno_pct=m.error_relleno_pct,
+        score_match=m.score_match,
+        tiene_marco=m.tiene_marco,
+    )
+
+
+@router.post("/upload", response_model=PipelineResponse, status_code=status.HTTP_202_ACCEPTED)
+async def procesar_upload_unico(
+    http_request: Request,
+    archivo: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+) -> PipelineResponse:
+    """
+    Sube un .gif/.png desde el cliente, lo procesa y elimina el temporal.
+    """
+    nombre = Path(archivo.filename or "").name
+    if not (nombre.lower().endswith(".gif") or nombre.lower().endswith(".png")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Solo se aceptan archivos .gif o .png.",
+        )
+
+    tmp_dir = tempfile.mkdtemp(prefix="radar_unico_")
+    try:
+        dest = Path(tmp_dir) / nombre
+        with dest.open("wb") as f:
+            shutil.copyfileobj(archivo.file, f)
+
+        try:
+            resultado = await ejecutar_pipeline_local(dest, db, request=http_request)
+        except PipelineCanceladoError:
+            raise HTTPException(
+                status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
+                detail="Procesamiento cancelado por el cliente.",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+        return _respuesta_pipeline(resultado)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 @router.post("/carpeta", response_model=BatchPipelineResponse, status_code=status.HTTP_200_OK)
 async def procesar_carpeta(
     body: ProcesarCarpetaRequest,
@@ -199,10 +261,16 @@ async def procesar_carpeta(
                 break
             except ValueError as e:
                 await file_db.rollback()
+                if await _lote_debe_detenerse(http_request):
+                    cancelado = True
+                    break
                 fallidos += 1
                 resultados.append({"archivo": archivo.name, "imagen_id": None, "exito": False, "mensaje_error": str(e)})
             except Exception as e:
                 await file_db.rollback()
+                if await _lote_debe_detenerse(http_request):
+                    cancelado = True
+                    break
                 fallidos += 1
                 resultados.append({"archivo": archivo.name, "imagen_id": None, "exito": False, "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}"})
 
@@ -222,10 +290,9 @@ async def procesar_upload_lote(
       1. `http_request.is_disconnected()` — el cliente cortó la conexión HTTP.
       2. `_lote_cancelado` — el cliente llamó a POST /procesamiento/lote/cancelar
          (necesario cuando el body ya fue recibido completo y is_disconnected no dispara).
-    """
-    # ── Reset de la flag al iniciar un nuevo lote ────────────────────────────
-    _reset_cancelacion()
 
+    La flag se resetea solo con POST /procesamiento/lote/iniciar (una vez por sesión de lote).
+    """
     tmp_dir = tempfile.mkdtemp(prefix="radar_lote_")
     try:
         paths = []
@@ -246,8 +313,7 @@ async def procesar_upload_lote(
         for path in paths:
             await asyncio.sleep(0)
 
-            # ── Chequeo doble de cancelación ─────────────────────────────────
-            if _lote_fue_cancelado() or await http_request.is_disconnected():
+            if await _lote_debe_detenerse(http_request):
                 cancelado = True
                 break
 
@@ -267,12 +333,27 @@ async def procesar_upload_lote(
                 except PipelineCanceladoError:
                     await file_db.rollback()
                     cancelado = True
-                    resultados.append({"archivo": path.name, "imagen_id": None, "exito": False, "mensaje_error": "Cancelado"})
                     break
+                except ValueError as e:
+                    await file_db.rollback()
+                    if await _lote_debe_detenerse(http_request):
+                        cancelado = True
+                        break
+                    fallidos += 1
+                    resultados.append({
+                        "archivo": path.name, "imagen_id": None, "exito": False,
+                        "mensaje_error": str(e)[:200],
+                    })
                 except Exception as e:
                     await file_db.rollback()
+                    if await _lote_debe_detenerse(http_request):
+                        cancelado = True
+                        break
                     fallidos += 1
-                    resultados.append({"archivo": path.name, "imagen_id": None, "exito": False, "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}"})
+                    resultados.append({
+                        "archivo": path.name, "imagen_id": None, "exito": False,
+                        "mensaje_error": f"{type(e).__name__}: {str(e)[:200]}",
+                    })
 
         return BatchPipelineResponse(total=len(paths), exitosos=exitosos, fallidos=fallidos, resultados=resultados, cancelado=cancelado)
     finally:
@@ -280,6 +361,17 @@ async def procesar_upload_lote(
 
 
 # ── Endpoint de cancelación del lote activo ───────────────────────────────────
+
+@router.post("/lote/iniciar", dependencies=[Depends(get_current_user)])
+async def iniciar_lote() -> dict:
+    """
+    Resetea la flag de cancelación al comenzar un lote nuevo.
+
+    Debe llamarse una sola vez antes de la primera tanda de upload-lote.
+    """
+    _reset_cancelacion()
+    return {"mensaje": "Lote iniciado. Flag de cancelación reseteada."}
+
 
 @router.post("/lote/cancelar", dependencies=[Depends(get_current_user)])
 async def cancelar_lote() -> dict:
