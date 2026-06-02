@@ -131,25 +131,14 @@ export function ProcesamientoLote() {
               <div className="flex items-center gap-3 mb-2">
                 <span className="animate-spin text-xl">⏳</span>
                 <p className="text-sm font-medium text-amber-700">
-                  Procesando...
-                  {lotesTotal > 0 && loteActual > 0 && ` tanda ${loteActual}/${lotesTotal}`}
-                  {procesados > 0 &&
-                    ` — ${procesados.toLocaleString()} / ${cantidadArchivos.toLocaleString()} archivos`}
+                  Procesando{lotesTotal > 0 && loteActual > 0 ? ` — tanda ${loteActual}/${lotesTotal}` : ''}
                 </p>
               </div>
-              <div className="w-full bg-amber-100 rounded-full h-2">
-                <div
-                  className="bg-amber-400 h-2 rounded-full transition-all duration-500"
-                  style={{
-                    width: cantidadArchivos > 0
-                      ? `${Math.min((procesados / cantidadArchivos) * 100, 95)}%`
-                      : '10%',
-                  }}
-                />
-              </div>
-              <p className="text-xs text-amber-600 mt-2">
-                Podés navegar a otras secciones — el procesamiento continúa en segundo plano.
-              </p>
+              {procesados > 0 && (
+                <p className="text-xs text-amber-600 mt-2">
+                  {procesados.toLocaleString()} archivos procesados hasta ahora.
+                </p>
+              )}
             </div>
           )}
 
@@ -182,7 +171,7 @@ export function ProcesamientoLote() {
 
           {resultado.cancelado && (
             <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-4">
-              Detuviste el lote. Los archivos que no se procesaron no se cuentan como errores.
+              Detuviste el lote.
             </p>
           )}
 

@@ -215,7 +215,7 @@ export function LoteProvider({ children }) {
           ({ exitosos, fallidos, resultados } = incorporarRespuestaLote(
             { exitosos, fallidos, resultados },
             data,
-            data.cancelado,
+            false,
           ));
           setProcesados(exitosos + fallidos);
 
@@ -249,7 +249,7 @@ export function LoteProvider({ children }) {
           ({ exitosos, fallidos, resultados } = incorporarRespuestaLote(
             { exitosos, fallidos, resultados },
             data,
-            data.cancelado,
+            false,
           ));
           setProcesados(exitosos + fallidos);
 
@@ -261,7 +261,7 @@ export function LoteProvider({ children }) {
       }
 
       setResultado({
-        total: totalAProcesar,
+        total: exitosos + fallidos,
         exitosos,
         fallidos,
         resultados,
@@ -276,7 +276,7 @@ export function LoteProvider({ children }) {
       }
       if (exitosos > 0 || resultados.length > 0 || cancelado) {
         setResultado({
-          total: totalAProcesar,
+          total: exitosos + fallidos,
           exitosos,
           fallidos,
           resultados,
