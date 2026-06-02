@@ -192,14 +192,9 @@ export const api = {
   },
 
   procesarLocal: (filePath) => {
-    const { id, signal, abort } = createController();
-    const promise = request('/procesamiento/local', {
-      method: 'POST',
-      body: JSON.stringify({ file_path: filePath }),
-    }, signal);
-    promise._cancel = abort;
-    promise._id = id;
-    return promise;
+    // Endpoint de procesamiento local individual deshabilitado intencionalmente.
+    // Usar la funcionalidad de procesamiento por lote desde la sección "Lote".
+    return Promise.reject(new ApiError('Procesamiento local individual deshabilitado. Usar Procesamiento por Lote.', 410));
   },
 
   procesarUploadUnico: (archivo) => {

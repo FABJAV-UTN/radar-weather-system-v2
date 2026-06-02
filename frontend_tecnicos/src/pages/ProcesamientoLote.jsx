@@ -28,11 +28,7 @@ export function ProcesamientoLote() {
     e.target.value = '';
   };
 
-  const abrirSelectorArchivos = () => {
-    const input = inputRef.current;
-    input.removeAttribute('webkitdirectory');
-    input.click();
-  };
+  /* La funcionalidad de seleccionar archivos individualmente fue removida. */
 
   const abrirSelectorCarpetaLegacy = () => {
     const input = inputRef.current;
@@ -78,13 +74,7 @@ export function ProcesamientoLote() {
 
         <div className="space-y-4">
           <div className="flex flex-wrap gap-3">
-            <button
-              onClick={abrirSelectorArchivos}
-              disabled={ocupado}
-              className="btn btn-outline"
-            >
-              🗂️ Seleccionar archivos
-            </button>
+            {/* Botón de selección de archivos eliminado intencionalmente */}
             <button
               onClick={abrirSelectorCarpeta}
               disabled={ocupado}

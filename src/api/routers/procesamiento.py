@@ -115,49 +115,6 @@ async def procesar_desde_url(
     )
 
 
-@router.post("/local", response_model=PipelineResponse, status_code=status.HTTP_202_ACCEPTED)
-async def procesar_desde_local(
-    request: ProcesarLocalRequest,
-    http_request: Request,
-    db: AsyncSession = Depends(get_db),
-    _user: dict = Depends(get_current_user),
-) -> PipelineResponse:
-    """
-    Lee el archivo desde `file_path` en el servidor y ejecuta el pipeline.
-    """
-    file_path = Path(request.file_path)
-    if not file_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Archivo no encontrado en el servidor: {file_path}",
-        )
-
-    try:
-        resultado = await ejecutar_pipeline_local(file_path, db, request=http_request)
-    except PipelineCanceladoError:
-        raise HTTPException(
-            status_code=status.HTTP_499_CLIENT_CLOSED_REQUEST,
-            detail="Procesamiento cancelado por el cliente.",
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-    m = resultado.metricas
-    return PipelineResponse(
-        imagen_id=resultado.imagen_id,
-        exito=resultado.exito,
-        mensaje_error=resultado.mensaje_error,
-        pixeles_originales=m.pixeles_originales,
-        pixeles_limpios=m.pixeles_limpios,
-        pixeles_rellenados=m.pixeles_rellenados,
-        pixeles_perdidos=m.pixeles_perdidos,
-        error_relleno_pct=m.error_relleno_pct,
-        score_match=m.score_match,
-        tiene_marco=m.tiene_marco,
-    )
-
 
 def _respuesta_pipeline(resultado) -> PipelineResponse:
     m = resultado.metricas

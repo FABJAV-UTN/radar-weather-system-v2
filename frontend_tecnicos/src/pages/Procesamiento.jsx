@@ -6,9 +6,6 @@ import { api, cancelRequest } from '../services/api';
 function PanelUnico() {
   const [modo, setModo] = useState('url');
   const [url, setUrl] = useState('');
-  const [filePath, setFilePath] = useState('');
-  const [archivoLocal, setArchivoLocal] = useState(null);
-  const [localSubmodo, setLocalSubmodo] = useState('subir');
   const [resultado, setResultado] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -35,12 +32,9 @@ function PanelUnico() {
       if (modo === 'url') {
         addLog('Iniciando descarga desde URL DACC...', 'info');
         promise = api.procesarUrl(url || undefined);
-      } else if (localSubmodo === 'subir') {
-        addLog(`Subiendo archivo: ${archivoLocal.name}`, 'info');
-        promise = api.procesarUploadUnico(archivoLocal);
       } else {
-        addLog(`Procesando archivo en servidor: ${filePath}`, 'info');
-        promise = api.procesarLocal(filePath);
+        // Modo alternativo no disponible en esta vista.
+        throw new Error('Procesamiento local individual no disponible. Usar Procesamiento por Lote.');
       }
 
       setCurrentRequestId(promise._id);
@@ -77,101 +71,31 @@ function PanelUnico() {
       <div className="card p-6">
         <h3 className="font-display text-lg font-bold text-gray-800 mb-1">⚡ Procesamiento único</h3>
         <p className="text-sm text-gray-500 mb-5">
-          Ejecuta el pipeline una sola vez desde la URL del DACC o subiendo un archivo .gif/.png.
+          Ejecuta el pipeline una sola vez desde la URL del DACC.
         </p>
 
-        {/* Selector de modo */}
+        {/* Selector de modo: solo URL — procesamiento local individual eliminado */}
         <div className="flex gap-2 mb-5">
-          <button onClick={() => setModo('url')} className={`btn ${modo === 'url' ? 'btn-primary' : 'btn-outline'}`}>
+          <button onClick={() => setModo('url')} className={`btn btn-primary`}>
             🌐 URL DACC
-          </button>
-          <button onClick={() => setModo('local')} className={`btn ${modo === 'local' ? 'btn-primary' : 'btn-outline'}`}>
-            💾 Archivo Local
           </button>
         </div>
 
-        {modo === 'url' ? (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              URL del radar <span className="text-gray-400 font-normal">(opcional — usa la URL por defecto si se deja vacío)</span>
-            </label>
-            <input
-              type="url"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              className="form-input"
-              placeholder="https://www2.contingencias.mendoza.gov.ar/radar/latest.gif"
-            />
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setLocalSubmodo('subir')}
-                className={`btn text-sm ${localSubmodo === 'subir' ? 'btn-primary' : 'btn-outline'}`}
-              >
-                📤 Subir archivo
-              </button>
-              <button
-                type="button"
-                onClick={() => setLocalSubmodo('ruta')}
-                className={`btn text-sm ${localSubmodo === 'ruta' ? 'btn-primary' : 'btn-outline'}`}
-              >
-                🖥️ Ruta en servidor
-              </button>
-            </div>
-
-            {localSubmodo === 'subir' ? (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Archivo .gif o .png desde tu computadora
-                </label>
-                <input
-                  type="file"
-                  accept=".gif,.png"
-                  onChange={(e) => {
-                    setArchivoLocal(e.target.files?.[0] || null);
-                    e.target.value = '';
-                  }}
-                  className="form-input file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:bg-celeste file:text-white file:cursor-pointer"
-                />
-                {archivoLocal && (
-                  <p className="text-xs text-gray-500 mt-2">
-                    Seleccionado: <span className="font-mono">{archivoLocal.name}</span>
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Ruta absoluta al archivo dentro del contenedor backend
-                </label>
-                <input
-                  type="text"
-                  value={filePath}
-                  onChange={(e) => setFilePath(e.target.value)}
-                  className="form-input"
-                  placeholder="/app/data/radar_20260524_143000.gif"
-                />
-                <p className="text-xs text-gray-400 mt-1">
-                  Solo para archivos que ya están en el servidor (Docker), no en tu PC.
-                </p>
-              </div>
-            )}
-          </div>
-        )}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            URL del radar <span className="text-gray-400 font-normal">(opcional — usa la URL por defecto si se deja vacío)</span>
+          </label>
+          <input
+            type="url"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            className="form-input"
+            placeholder="https://www2.contingencias.mendoza.gov.ar/radar/latest.gif"
+          />
+        </div>
 
         <div className="flex gap-3 mt-5">
-          <button
-            onClick={handleProcesar}
-            disabled={
-              loading
-              || (modo === 'local' && localSubmodo === 'subir' && !archivoLocal)
-              || (modo === 'local' && localSubmodo === 'ruta' && !filePath)
-            }
-            className="btn btn-primary"
-          >
+          <button onClick={handleProcesar} disabled={loading} className="btn btn-primary">
             {loading
               ? <><span className="animate-spin">⏳</span> Procesando...</>
               : <>▶️ Procesar {modo === 'url' ? 'URL' : 'Archivo'}</>
