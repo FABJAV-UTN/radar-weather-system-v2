@@ -55,9 +55,6 @@ export function Imagenes() {
   const [porPagina, setPorPagina] = useState(50);
 
   // ── Ordenamiento server-side ──────────────────────────────────────────────
-  // sortCol y sortDir se envían como parámetros al backend en cada request.
-  // El backend ordena TODOS los registros antes de paginar, por lo que el
-  // orden es global (no solo la página visible).
   const [sortCol, setSortCol] = useState('id');
   const [sortDir, setSortDir] = useState('desc');
 
@@ -69,8 +66,6 @@ export function Imagenes() {
   const [errorLote, setErrorLote]             = useState('');
 
   // ── Carga de datos ────────────────────────────────────────────────────────
-  // sort_by y sort_dir viajan como query params al backend → la DB ordena
-  // el conjunto completo ANTES de aplicar limit/offset.
   const cargarImagenes = useCallback(async () => {
     setLoading(true);
     try {
@@ -96,7 +91,6 @@ export function Imagenes() {
     cargarImagenes();
   }, [cargarImagenes]);
 
-  // Al cambiar filtros o porPagina, volver a página 1
   const handleFiltro = (nuevoFiltro) => {
     setFiltro(nuevoFiltro);
     setPagina(1);
@@ -107,8 +101,6 @@ export function Imagenes() {
   };
 
   // ── Ordenamiento ──────────────────────────────────────────────────────────
-  // Al cambiar columna o dirección se vuelve a página 1 para evitar
-  // mostrar una página "en el medio" del nuevo orden.
   const handleSort = (col) => {
     if (sortCol === col) {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -120,12 +112,14 @@ export function Imagenes() {
   };
 
   // ── Descarga individual ───────────────────────────────────────────────────
+  // FIX: ya no se construye el filename en el frontend con img.fecha_hora
+  // (que JavaScript parsea como UTC y desplaza por zona horaria).
+  // El nombre correcto viene en el header Content-Disposition del backend.
   const handleDescargar = async (img) => {
     if (img.estado !== 'completado' || descargando) return;
     setDescargando(img.id);
     try {
-      const fecha = img.fecha_hora?.replace(/[:\s]/g, '_') || img.id;
-      await api.descargarGeotiff(img.id, `radar_${img.id}_${fecha}.tif`);
+      await api.descargarGeotiff(img.id);
     } catch (err) {
       alert(`Error al descargar: ${err.message}`);
     } finally {
@@ -334,7 +328,7 @@ export function Imagenes() {
                           {new Date(img.fecha_hora).toLocaleDateString('es-AR')}
                         </div>
                         <div className="text-gray-400 text-xs">
-                          {new Date(img.fecha_hora).toLocaleTimeString('es-AR')}
+                          {new Date(img.fecha_hora).toLocaleTimeString('es-AR', { hour12: false })}
                         </div>
                       </td>
 

@@ -150,7 +150,10 @@ export const api = {
 
   obtenerImagen: (id) => request(`/imagenes/${id}`),
 
-  descargarGeotiff: async (id, filename) => {
+  // FIX: el filename se lee del header Content-Disposition que envía el backend,
+  // que lo arma con strftime('%Y%m%d_%H%M%S') directo desde la DB → siempre 24h.
+  // Ya no se recibe ni construye el filename en el frontend.
+  descargarGeotiff: async (id) => {
     const token = localStorage.getItem('access_token');
     const response = await fetch(`${API_BASE}/imagenes/${id}/geotiff`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -159,11 +162,17 @@ export const api = {
       const data = await response.json().catch(() => ({}));
       throw new ApiError(data.detail || `Error ${response.status}`, response.status);
     }
+
+    // Leer filename desde el header que arma el backend
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `radar_${id}.tif`;
+
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = filename || `radar_${id}.tif`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
