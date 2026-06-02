@@ -29,6 +29,11 @@ THRESHOLD_WIDTH: int = settings.template_width_threshold  # 799
 MIN_MATCH_SCORE: float = settings.match_score_min          # 0.3
 COMPRESS: str = "lzw"
 
+# Caos cromático
+COLOR_CANDIDATES: int = 10    # top-N candidatos de forma que se validan por color
+MIN_UNIQUE_COLORS: int = 30   # colores únicos mínimos esperados en el eco fijo
+COLOR_CHAOS_WEIGHT: float = 0.7  # peso del caos en score combinado (forma=0.3, caos=0.7)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -162,12 +167,185 @@ def _best_loc_from_result(
     return (0, 0), 0.0
 
 
+def _top_candidates_from_result(
+    result_map: np.ndarray,
+    image_mask: np.ndarray,
+    tmpl_h: int,
+    tmpl_w: int,
+    n: int,
+    min_overlap_ratio: float = 0.05,
+) -> list[tuple[tuple, float]]:
+    """
+    Devuelve los top-N candidatos válidos del mapa de correlación,
+    ordenados de mayor a menor score de forma.
+
+    Se garantiza separación mínima entre candidatos (al menos max(tmpl_w, tmpl_h)//2
+    píxeles) para no devolver variantes del mismo pico.
+
+    Args:
+        result_map: Mapa de correlación (H', W') float32.
+        image_mask: Máscara binaria de la imagen (H, W) uint8.
+        tmpl_h, tmpl_w: Dimensiones del template.
+        n: Número máximo de candidatos a devolver.
+        min_overlap_ratio: Fracción mínima del template con píxeles de forma.
+
+    Returns:
+        Lista de ((col, row), score_forma) ordenada de mayor a menor score.
+    """
+    tmpl_area = tmpl_h * tmpl_w
+    safe_map = result_map.copy()
+    safe_map[~np.isfinite(safe_map)] = -1.0
+
+    flat = safe_map.flatten()
+    pool_size = min(n * 20, flat.size)
+    top_indices = np.argpartition(flat, -pool_size)[-pool_size:]
+    top_indices = top_indices[np.argsort(flat[top_indices])[::-1]]
+
+    img_h, img_w = image_mask.shape
+    min_dist = max(tmpl_w, tmpl_h) // 2
+    accepted: list[tuple[tuple, float]] = []
+
+    for idx in top_indices:
+        if len(accepted) >= n:
+            break
+        score = float(flat[idx])
+        if score < 0:
+            break
+
+        row = int(idx // safe_map.shape[1])
+        col = int(idx % safe_map.shape[1])
+
+        # Filtro overlap
+        r0, r1 = row, min(row + tmpl_h, img_h)
+        c0, c1 = col, min(col + tmpl_w, img_w)
+        ratio = int(np.count_nonzero(image_mask[r0:r1, c0:c1])) / tmpl_area
+        if ratio < min_overlap_ratio:
+            continue
+
+        # Filtro distancia (evitar duplicados del mismo pico)
+        too_close = any(
+            abs(col - ac) < min_dist and abs(row - ar) < min_dist
+            for (ac, ar), _ in accepted
+        )
+        if too_close:
+            continue
+
+        accepted.append(((col, row), score))
+
+    return accepted
+
+
+def color_chaos_score(
+    png_arr: np.ndarray,
+    image_mask: np.ndarray,
+    top_left: tuple,
+    tmpl_h: int,
+    tmpl_w: int,
+) -> float:
+    """
+    Mide el "caos cromático" en la región del match propuesta.
+
+    El eco fijo es ruido electromagnético de terreno: devuelve señales
+    incoherentes pintadas con colores aleatorios y fragmentados, sin patrón
+    cromático dominante. La precipitación real tiene colores coherentes y
+    graduales (verde → amarillo → rojo).
+
+    Métricas combinadas (todas normalizadas a [0, 1]):
+
+    1. Diversidad de colores cuantizados:
+       Reduce la paleta a 8 niveles por canal y cuenta combinaciones únicas.
+       Más colores distintos → más caos.
+
+    2. Varianza espacial local (gradiente promedio):
+       Gradiente Sobel en la región. Alta varianza → píxeles vecinos muy
+       diferentes → caos.
+
+    3. Ausencia de color dominante (entropía del tono Hue en HSV):
+       Distribución plana de tonos → alta entropía → caos. Precipitación
+       real concentra verde o amarillo.
+
+    Solo se evalúan los píxeles que son forma (image_mask == 255) dentro
+    de la ventana del candidato.
+
+    Args:
+        png_arr: Array original con color (H, W, C) uint8.
+        image_mask: Máscara binaria de la imagen (H, W) uint8.
+        top_left: (col, row) esquina superior izquierda del candidato.
+        tmpl_h, tmpl_w: Dimensiones del template.
+
+    Returns:
+        float en [0, 1]: 0 = zona uniforme/monocromática, 1 = máximo caos.
+    """
+    col, row = int(top_left[0]), int(top_left[1])
+    img_h, img_w = png_arr.shape[:2]
+
+    r0 = max(row, 0)
+    r1 = min(row + tmpl_h, img_h)
+    c0 = max(col, 0)
+    c1 = min(col + tmpl_w, img_w)
+
+    if r1 <= r0 or c1 <= c0:
+        return 0.0
+
+    region_color = png_arr[r0:r1, c0:c1]
+    region_mask  = image_mask[r0:r1, c0:c1]
+
+    form_pixels = np.count_nonzero(region_mask)
+    if form_pixels < 20:
+        return 0.0
+
+    mask_bool = region_mask == 255
+    rgb = region_color[:, :, :3][mask_bool] if region_color.ndim == 3 else np.stack(
+        [region_color[mask_bool]] * 3, axis=1
+    )
+
+    # ── Métrica 1: diversidad de colores cuantizados ──────────────────────
+    quant = (rgb // 32).astype(np.int32)
+    color_ids = quant[:, 0] * 64 + quant[:, 1] * 8 + quant[:, 2]
+    diversity_score = min(len(np.unique(color_ids)) / MIN_UNIQUE_COLORS, 1.0)
+
+    # ── Métrica 2: varianza espacial local (gradiente Sobel) ──────────────
+    gray_region = cv2.cvtColor(
+        region_color[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY
+    ).astype(np.float32)
+    gray_masked = gray_region.copy()
+    gray_masked[~mask_bool] = 0.0
+
+    grad_x = cv2.Sobel(gray_masked, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray_masked, cv2.CV_32F, 0, 1, ksize=3)
+    mean_grad = float(np.sqrt(grad_x**2 + grad_y**2)[mask_bool].mean())
+    gradient_score = min(mean_grad / 50.0, 1.0)
+
+    # ── Métrica 3: entropía del tono (Hue) ───────────────────────────────
+    hsv_img = cv2.cvtColor(region_color[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2HSV)
+    hue_vals = hsv_img[:, :, 0][mask_bool]
+    sat_vals  = hsv_img[:, :, 1][mask_bool]
+    colored   = hue_vals[sat_vals > 30]
+
+    if len(colored) > 10:
+        hist, _ = np.histogram(colored, bins=18, range=(0, 180))
+        p = hist.astype(np.float32)
+        p = p[p > 0] / p.sum()
+        entropy_score = min(float(-np.sum(p * np.log2(p))) / np.log2(18), 1.0)
+    else:
+        entropy_score = 0.0
+
+    chaos = (diversity_score + gradient_score + entropy_score) / 3.0
+    logger.debug(
+        "      caos @ (%d,%d): div=%.3f grad=%.3f entr=%.3f → %.3f",
+        col, row, diversity_score, gradient_score, entropy_score, chaos,
+    )
+    return chaos
+
+
 def match_template_binary(
     image_mask: np.ndarray,
     template_mask: np.ndarray,
+    png_arr: np.ndarray | None = None,
 ) -> tuple[tuple[int, int], float, str]:
     """
-    Template matching sobre máscaras binarias con estrategia dinámica en cascada.
+    Template matching sobre máscaras binarias con estrategia dinámica en cascada,
+    seguido de validación por caos cromático cuando png_arr está disponible.
 
     Problema que resuelve:
         TM_CCOEFF_NORMED compara pixel a pixel TODO el template contra la ventana
@@ -175,31 +353,36 @@ def match_template_binary(
         del eco fijo, el fondo del template no coincide con las nubes, bajando
         el score aunque la FORMA coincida.
 
+        Adicionalmente, zonas de precipitación densa pueden tener forma binaria
+        similar al eco fijo y "ganar" el matching. La validación por caos cromático
+        descarta esas zonas: precipitación real = colores coherentes; eco fijo =
+        colores caóticos y fragmentados.
+
     Estrategia:
-        1. MASKED (TM_CCORR_NORMED + máscara de forma):
-           Solo correlaciona los píxeles de forma del template. El fondo negro
-           se ignora. Puede producir inf/nan si la ventana candidata está sobre
-           una zona completamente negra → se filtra con _best_loc_from_result.
-
-        2. CLASSIC (TM_CCOEFF_NORMED sin máscara):
-           Matching clásico; más robusto numéricamente pero sensible al fondo.
-
-        3. SELECCIÓN DINÁMICA:
-           Solo se consideran scores finitos y con overlap real de píxeles.
-           Se elige el método con mayor score válido.
+        1. MASKED (TM_CCORR_NORMED + máscara de forma): ignora el fondo negro.
+        2. CLASSIC (TM_CCOEFF_NORMED sin máscara): más robusto numéricamente.
+        3. POOL UNIFICADO: se fusionan los top-COLOR_CANDIDATES de ambos métodos,
+           se evalúa el caos cromático de cada posición única y se elige el
+           candidato con mayor score combinado:
+               score_combinado = (1 - COLOR_CHAOS_WEIGHT) * score_forma
+                               + COLOR_CHAOS_WEIGHT * score_caos
+           Si png_arr no está disponible, se usa solo el mejor score de forma
+           (comportamiento original).
 
     Args:
         image_mask: Máscara de la imagen de radar (H, W) uint8.
         template_mask: Máscara del eco fijo (h, w) uint8 con h<H y w<W.
+        png_arr: Array original con color (H, W, C) uint8, opcional.
+                 Si se provee, activa la validación por caos cromático.
 
     Returns:
-        Tupla ((col, fila), score, method_used).
+        Tupla ((col, fila), score_forma, method_used).
     """
-    image_f = image_mask.astype(np.float32)
+    image_f   = image_mask.astype(np.float32)
     template_f = template_mask.astype(np.float32)
     tmpl_h, tmpl_w = template_mask.shape[:2]
 
-    results: dict[str, tuple[tuple, float]] = {}
+    raw_results: dict[str, list[tuple[tuple, float]]] = {}
 
     # ── Método 1: Masked (TM_CCORR_NORMED + máscara) ─────────────────────────
     if np.count_nonzero(template_mask) > 0:
@@ -208,39 +391,98 @@ def match_template_binary(
                 image_f, template_f, cv2.TM_CCORR_NORMED,
                 mask=template_mask.astype(np.float32),
             )
-            loc_m, score_m = _best_loc_from_result(result_masked, image_mask, tmpl_h, tmpl_w)
-            if _valid_score(score_m):
-                results["masked"] = (loc_m, score_m)
-                logger.debug("    [masked]   score=%.4f @ %s", score_m, loc_m)
-            else:
-                logger.warning("    [masked] score inválido (%s), descartado.", score_m)
+            candidates_m = _top_candidates_from_result(
+                result_masked, image_mask, tmpl_h, tmpl_w, COLOR_CANDIDATES
+            )
+            if candidates_m:
+                raw_results["masked"] = candidates_m
+                logger.debug("    [masked] top: score=%.4f @ %s", candidates_m[0][1], candidates_m[0][0])
         except cv2.error as exc:
             logger.warning("    Masked matching no disponible: %s", exc)
 
     # ── Método 2: Classic (TM_CCOEFF_NORMED sin máscara) ─────────────────────
     try:
         result_classic = cv2.matchTemplate(image_f, template_f, cv2.TM_CCOEFF_NORMED)
-        loc_c, score_c = _best_loc_from_result(result_classic, image_mask, tmpl_h, tmpl_w)
-        if _valid_score(score_c):
-            results["classic"] = (loc_c, score_c)
-            logger.debug("    [classic]  score=%.4f @ %s", score_c, loc_c)
-        else:
-            logger.warning("    [classic] score inválido (%s), descartado.", score_c)
+        candidates_c = _top_candidates_from_result(
+            result_classic, image_mask, tmpl_h, tmpl_w, COLOR_CANDIDATES
+        )
+        if candidates_c:
+            raw_results["classic"] = candidates_c
+            logger.debug("    [classic] top: score=%.4f @ %s", candidates_c[0][1], candidates_c[0][0])
     except cv2.error as exc:
         logger.warning("    Classic matching falló: %s", exc)
 
-    if not results:
+    if not raw_results:
         raise RuntimeError("Todos los métodos de template matching fallaron.")
 
-    best_method = max(results, key=lambda k: results[k][1])
-    best_loc, best_score = results[best_method]
+    # ── Pool unificado: fusionar candidatos de ambos métodos ──────────────────
+    # Para posiciones solapadas se conserva el mayor score de forma.
+    min_dist = max(tmpl_w, tmpl_h) // 2
+    unified: dict[tuple, tuple[float, str]] = {}  # loc → (score_forma, method)
 
-    logger.info("Match → [%s] score=%.4f @ %s", best_method, best_score, best_loc)
-    if len(results) > 1:
-        other = next(k for k in results if k != best_method)
-        logger.info("Descartado → [%s] score=%.4f", other, results[other][1])
+    for method_name, candidates in raw_results.items():
+        for loc, score_forma in candidates:
+            if not _valid_score(score_forma):
+                continue
+            merged = False
+            for existing_loc in list(unified.keys()):
+                if abs(loc[0] - existing_loc[0]) < min_dist and abs(loc[1] - existing_loc[1]) < min_dist:
+                    if score_forma > unified[existing_loc][0]:
+                        unified[existing_loc] = (score_forma, method_name)
+                    merged = True
+                    break
+            if not merged:
+                unified[loc] = (score_forma, method_name)
 
-    return best_loc, best_score, best_method
+    logger.debug("    Pool unificado: %d candidatos únicos", len(unified))
+
+    # ── Selección por score combinado (forma + caos cromático) ────────────────
+    best_loc: tuple | None = None
+    best_score_forma = -1.0
+    best_combined    = -1.0
+    best_method      = ""
+
+    for loc, (score_forma, method_name) in unified.items():
+        if png_arr is not None:
+            chaos    = color_chaos_score(png_arr, image_mask, loc, tmpl_h, tmpl_w)
+            combined = (1.0 - COLOR_CHAOS_WEIGHT) * score_forma + COLOR_CHAOS_WEIGHT * chaos
+        else:
+            chaos    = float("nan")
+            combined = score_forma
+
+        chaos_str = f"{chaos:.3f}" if not np.isnan(chaos) else "n/a"
+        logger.debug(
+            "      [%s] loc=%s forma=%.4f caos=%s combinado=%.4f",
+            method_name, loc, score_forma, chaos_str, combined,
+        )
+
+        if combined > best_combined:
+            best_combined    = combined
+            best_score_forma = score_forma
+            best_loc         = loc
+            best_method      = method_name
+
+    # Fallback extremo (no debería ocurrir)
+    if best_loc is None:
+        for method_name, candidates in raw_results.items():
+            if candidates:
+                loc, score_forma = candidates[0]
+                if _valid_score(score_forma) and score_forma > best_score_forma:
+                    best_score_forma = score_forma
+                    best_loc         = loc
+                    best_method      = method_name
+
+    if best_loc is None:
+        logger.warning("No se encontró ningún candidato válido. Devolviendo (0,0).")
+        best_loc         = (0, 0)
+        best_score_forma = 0.0
+        best_method      = "fallback"
+
+    logger.info(
+        "Match → [%s] score_forma=%.4f score_combinado=%.4f @ %s",
+        best_method, best_score_forma, best_combined, best_loc,
+    )
+    return best_loc, best_score_forma, best_method
 
 
 def pixel_to_geo(transform: Affine, col: float, row: float) -> tuple[float, float]:
@@ -390,8 +632,11 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
     2. Leer CRS y Transform del template.
     3. Extraer máscara de forma del array.
     4. Cargar template_eco_fijo y extraer su máscara de forma.
-    5. Template matching en cascada (masked → classic): encontrar dónde está
-       el eco en la imagen ignorando el fondo negro del template.
+    5. Template matching en cascada (masked → classic) con validación por caos
+       cromático: el eco fijo tiene colores caóticos (ruido de terreno), mientras
+       que la precipitación real tiene colores coherentes. Se fusionan los
+       candidatos de ambos métodos y se elige el de mayor score combinado
+       (forma + caos).
     6. Calcular delta geográfico entre posición encontrada y posición real.
     7. Corregir el Affine Transform.
     8. Construir máscara booleana de clutter (ecos fijos) en coordenadas de imagen.
@@ -441,13 +686,8 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
             f"Template eco ({eco_mask.shape}) mayor que la imagen ({png_mask.shape})."
         )
 
-    # ── 5. Template matching en cascada ──────────────────────────────────────
-    # Usa masked (TM_CCORR_NORMED + máscara de forma) como método principal y
-    # classic (TM_CCOEFF_NORMED) como fallback. Selecciona dinámicamente el
-    # método con mayor score válido (finito, ≥0, con overlap real de píxeles).
-    # Esto resuelve el problema de scores bajos cuando hay precipitación alrededor
-    # del eco fijo: el método masked ignora el fondo negro del template.
-    top_left, score, method_used = match_template_binary(png_mask, eco_mask)
+    # ── 5. Template matching con validación por caos cromático ───────────────
+    top_left, score, method_used = match_template_binary(png_mask, eco_mask, filled_rgb)
     match_col, match_row = top_left
     logger.info(
         "Match: top_left=(%d, %d), score=%.4f, método=%s",
