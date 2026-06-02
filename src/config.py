@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # Score mínimo aceptable de template matching
     match_score_min: float = 0.3
 
+    # ── Radar débil / eco verde ─────────────────────────────────────────────────
+    weak_precip_hue_min: int = 35
+    weak_precip_hue_max: int = 85
+    weak_precip_sat_min: int = 100
+    weak_precip_val_min: int = 80
+
     # ── OCR ──────────────────────────────────────────────────────────────────
     ocr_tolerance: float = 0.85
     # Offset UTC→Mendoza (UTC-3)

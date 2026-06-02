@@ -304,17 +304,22 @@ def color_chaos_score(
     color_ids = quant[:, 0] * 64 + quant[:, 1] * 8 + quant[:, 2]
     diversity_score = min(len(np.unique(color_ids)) / MIN_UNIQUE_COLORS, 1.0)
 
-    # ── Métrica 2: varianza espacial local (gradiente Sobel) ──────────────
+    # ── Métrica 2: varianza LOCAL píxel a píxel (ventana 3x3) ────────────────
+    # El eco fijo cambia de color abruptamente entre píxeles vecinos (ruido puro).
+    # La precipitación intensa también tiene colores mezclados, pero con transiciones
+    # suaves a escala de píxel. La varianza en ventanas 3x3 captura exactamente
+    # esa diferencia: alta en eco fijo, moderada incluso en tormentas fuertes.
     gray_region = cv2.cvtColor(
         region_color[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY
     ).astype(np.float32)
-    gray_masked = gray_region.copy()
-    gray_masked[~mask_bool] = 0.0
 
-    grad_x = cv2.Sobel(gray_masked, cv2.CV_32F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(gray_masked, cv2.CV_32F, 0, 1, ksize=3)
-    mean_grad = float(np.sqrt(grad_x**2 + grad_y**2)[mask_bool].mean())
-    gradient_score = min(mean_grad / 50.0, 1.0)
+    kernel = np.ones((3, 3), dtype=np.float32) / 9.0
+    mean_local  = cv2.filter2D(gray_region, -1, kernel)
+    mean2_local = cv2.filter2D(gray_region ** 2, -1, kernel)
+    var_local   = np.maximum(mean2_local - mean_local ** 2, 0.0)
+
+    mean_var = float(var_local[mask_bool].mean()) if form_pixels > 0 else 0.0
+    local_var_score = min(mean_var / 200.0, 1.0)
 
     # ── Métrica 3: entropía del tono (Hue) ───────────────────────────────
     hsv_img = cv2.cvtColor(region_color[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2HSV)
@@ -330,10 +335,10 @@ def color_chaos_score(
     else:
         entropy_score = 0.0
 
-    chaos = (diversity_score + gradient_score + entropy_score) / 3.0
+    chaos = (diversity_score + local_var_score + entropy_score) / 3.0
     logger.debug(
         "      caos @ (%d,%d): div=%.3f grad=%.3f entr=%.3f → %.3f",
-        col, row, diversity_score, gradient_score, entropy_score, chaos,
+        col, row, diversity_score, local_var_score, entropy_score, chaos,
     )
     return chaos
 
