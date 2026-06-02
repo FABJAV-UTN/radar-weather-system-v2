@@ -1,8 +1,8 @@
-"""descripcion
+"""add_dbz_max
 
-Revision ID: 1267d4bfb04c
+Revision ID: 25c065eb73d4
 Revises: 4695d1c4d543
-Create Date: 2026-05-23 23:00:17.799430
+Create Date: 2026-06-01 20:23:19.462674
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '1267d4bfb04c'
+revision: str = '25c065eb73d4'
 down_revision: Union[str, Sequence[str], None] = '4695d1c4d543'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -24,6 +24,7 @@ def upgrade() -> None:
     op.alter_column('imagenes_radar', 'tiene_marco',
                existing_type=sa.BOOLEAN(),
                nullable=False)
+    op.add_column('metricas_procesamiento', sa.Column('dbz_max', sa.Float(), nullable=True))
     op.alter_column('metricas_procesamiento', 'error_relleno_pct',
                existing_type=sa.NUMERIC(precision=5, scale=2),
                nullable=False)
@@ -46,6 +47,7 @@ def downgrade() -> None:
     op.alter_column('metricas_procesamiento', 'error_relleno_pct',
                existing_type=sa.NUMERIC(precision=5, scale=2),
                nullable=True)
+    op.drop_column('metricas_procesamiento', 'dbz_max')
     op.alter_column('imagenes_radar', 'tiene_marco',
                existing_type=sa.BOOLEAN(),
                nullable=True)
