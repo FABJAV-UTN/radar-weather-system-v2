@@ -29,42 +29,61 @@ THRESHOLD_WIDTH: int = settings.template_width_threshold  # 799
 MIN_MATCH_SCORE: float = settings.match_score_min          # 0.3
 COMPRESS: str = "lzw"
 
-# Caos cromático
-COLOR_CANDIDATES: int = 10    # top-N candidatos de forma que se validan por color
-MIN_UNIQUE_COLORS: int = 30   # colores únicos mínimos esperados en el eco fijo
-COLOR_CHAOS_WEIGHT: float = 0.7  # peso del caos en score combinado (forma=0.3, caos=0.7)
+MIN_MATCH_SCORE_GLOBAL: float = 0.50
+MIN_SHAPE_IOU: float = 0.20
+MIN_GLOBAL_CORR: float = 0.30
+ANCHOS = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
+
+# Filtro DBZ < 35
+DBZ_COLOR_MAP = {
+    10: (66, 63, 140),  20: (0, 88, 5),    30: (0, 111, 9),
+    35: (0, 132, 220),  36: (0, 82, 233),   39: (108, 39, 199),
+    42: (210, 30, 133), 45: (200, 102, 135), 48: (219, 136, 52),
+    51: (255, 195, 41), 54: (255, 247, 10),  57: (255, 155, 83),
+    60: (255, 95, 0),   65: (255, 52, 0),    70: (191, 191, 191),
+    80: (212, 212, 212),
+}
+DBZ_BELOW_35 = {k: v for k, v in DBZ_COLOR_MAP.items() if k < 35}
+DBZ_COLOR_TOLERANCE: float = 18
+
+# Filtro marca de agua / verde
+WATERMARK_GREEN_MIN: int = 50
+WATERMARK_GREEN_MAX: int = 140
+WATERMARK_DOMINANCE: int = 15
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_template_paths(width: int) -> tuple[Path, Path]:
     """
-    Devuelve las rutas de (template_geo, template_eco_fijo) según el ancho.
-
-    - tif700.tif → imágenes ≤ 799px de ancho.
-    - tif800.tif → imágenes > 799px de ancho.
-    - template_eco_fijo.tif → ancla geográfica siempre igual.
-
-    Args:
-        width: Ancho de la imagen procesada.
-
-    Returns:
-        Tupla (ruta_template_geo, ruta_template_eco_fijo).
-
-    Raises:
-        FileNotFoundError: Si algún template no existe en template_dir.
+    Devuelve (template_geo, template_eco_fijo_principal) según el ancho.
+    El segundo valor es solo el primer eco template; para obtener todos
+    los templates eco usa get_eco_template_paths().
     """
     template_dir = Path(settings.template_dir)
     geo_name = "tif800.tif" if width > THRESHOLD_WIDTH else "tif700.tif"
     geo_path = template_dir / geo_name
-    eco_path = template_dir / "template_eco_fijo.tif"
 
     if not geo_path.exists():
         raise FileNotFoundError(f"Template de georreferencia no encontrado: {geo_path}")
-    if not eco_path.exists():
-        raise FileNotFoundError(f"Template eco fijo no encontrado: {eco_path}")
 
-    return geo_path, eco_path
+    return geo_path, _get_eco_template_paths(template_dir)[0]
+
+
+def _get_eco_template_paths(template_dir: Path | None = None) -> list[Path]:
+    """
+    Devuelve todos los templates eco disponibles (al menos uno debe existir).
+    Soporta template_eco_fijo.tif y template_eco_fijo2.tif.
+    """
+    if template_dir is None:
+        template_dir = Path(settings.template_dir)
+    names = ["template_eco_fijo.tif", "template_eco_fijo2.tif"]
+    paths = [template_dir / n for n in names if (template_dir / n).exists()]
+    if not paths:
+        raise FileNotFoundError(
+            f"No se encontró ningún template eco en {template_dir}"
+        )
+    return paths
 
 
 def extract_shape_mask(arr: np.ndarray, threshold: int = 10) -> np.ndarray:
@@ -74,13 +93,6 @@ def extract_shape_mask(arr: np.ndarray, threshold: int = 10) -> np.ndarray:
     - RGBA: usa el canal alpha (alpha > threshold → forma).
     - RGB: cualquier canal > threshold → forma.
     - 2D: valor > threshold → forma.
-
-    Args:
-        arr: Array numpy (H, W) o (H, W, 3) o (H, W, 4).
-        threshold: Valor mínimo de píxel para considerar que es forma.
-
-    Returns:
-        Máscara uint8 con 255=forma, 0=fondo.
     """
     if arr.ndim == 2:
         return (arr > threshold).astype(np.uint8) * 255
@@ -89,437 +101,270 @@ def extract_shape_mask(arr: np.ndarray, threshold: int = 10) -> np.ndarray:
     return (np.any(arr[:, :, :3] > threshold, axis=2)).astype(np.uint8) * 255
 
 
-def _valid_score(score: float) -> bool:
-    """Devuelve True solo si el score es un número finito y no negativo."""
-    return np.isfinite(score) and score >= 0.0
+# ── Filtros de salida ─────────────────────────────────────────────────────────
 
-
-def _best_loc_from_result(
-    result_map: np.ndarray,
-    image_mask: np.ndarray,
-    tmpl_h: int,
-    tmpl_w: int,
-    min_overlap_ratio: float = 0.05,
-) -> tuple[tuple, float]:
+def build_dbz_below35_mask(arr: np.ndarray) -> np.ndarray:
     """
-    Elige la mejor posición en el mapa de correlación excluyendo zonas vacías.
-
-    TM_CCORR_NORMED con máscara produce inf/nan cuando la región de la imagen
-    bajo la máscara tiene norma cero (zona completamente negra). Para evitar
-    que esos valores inválidos "ganen" la selección, se descarta cualquier
-    posición candidata que no tenga suficientes píxeles de forma en la ventana.
-
-    Estrategia:
-        1. Marcar como -1 todas las posiciones con valor no finito.
-        2. Recorrer los mejores candidatos (hasta MAX_CANDIDATES) en orden
-           descendente de score.
-        3. Para cada candidato, calcular cuántos píxeles de forma (image_mask==255)
-           caen dentro de la ventana del template.
-        4. Aceptar el primero que supere min_overlap_ratio * template_area.
-        5. Si ninguno supera el umbral, devolver el candidato con mayor score
-           finito (puede ser bajo, pero al menos es numérico).
+    Devuelve máscara booleana de píxeles con color correspondiente a dBZ < 35.
+    Estos son ecos débiles que no representan precipitación significativa.
     """
-    MAX_CANDIDATES = 20
-    tmpl_area = tmpl_h * tmpl_w
-
-    safe_map = result_map.copy()
-    safe_map[~np.isfinite(safe_map)] = -1.0
-
-    flat = safe_map.flatten()
-    top_indices = np.argpartition(flat, -MAX_CANDIDATES)[-MAX_CANDIDATES:]
-    top_indices = top_indices[np.argsort(flat[top_indices])[::-1]]
-
-    img_h, img_w = image_mask.shape
-    best_finite_loc = None
-    best_finite_score = -1.0
-
-    for idx in top_indices:
-        score = float(flat[idx])
-        if score < 0:
-            continue
-
-        row = int(idx // safe_map.shape[1])
-        col = int(idx % safe_map.shape[1])
-
-        r0, r1 = row, min(row + tmpl_h, img_h)
-        c0, c1 = col, min(col + tmpl_w, img_w)
-        window = image_mask[r0:r1, c0:c1]
-        ratio = int(np.count_nonzero(window)) / tmpl_area
-
-        logger.debug("      candidato (%d,%d) score=%.4f overlap=%.3f", col, row, score, ratio)
-
-        if ratio >= min_overlap_ratio:
-            return (col, row), score
-
-        if score > best_finite_score:
-            best_finite_score = score
-            best_finite_loc = (col, row)
-
-    if best_finite_loc is not None:
-        logger.warning(
-            "Ningún candidato superó overlap_ratio=%.2f. "
-            "Usando mejor score finito: %.4f @ %s",
-            min_overlap_ratio, best_finite_score, best_finite_loc,
-        )
-        return best_finite_loc, best_finite_score
-
-    logger.warning("Mapa de correlación sin valores válidos. Devolviendo (0,0).")
-    return (0, 0), 0.0
+    rgb = arr[:, :, :3].astype(np.float32)
+    mask = np.zeros(arr.shape[:2], dtype=bool)
+    for _, (r, g, b) in DBZ_BELOW_35.items():
+        dist = np.linalg.norm(rgb - np.array([r, g, b], dtype=np.float32), axis=2)
+        mask |= dist <= DBZ_COLOR_TOLERANCE
+    logger.debug("  Filtro DBZ<35: %d píxeles", int(np.count_nonzero(mask)))
+    return mask
 
 
-def _top_candidates_from_result(
-    result_map: np.ndarray,
-    image_mask: np.ndarray,
-    tmpl_h: int,
-    tmpl_w: int,
-    n: int,
-    min_overlap_ratio: float = 0.05,
-) -> list[tuple[tuple, float]]:
+def build_watermark_mask(arr: np.ndarray) -> np.ndarray:
     """
-    Devuelve los top-N candidatos válidos del mapa de correlación,
-    ordenados de mayor a menor score de forma.
-
-    Se garantiza separación mínima entre candidatos (al menos max(tmpl_w, tmpl_h)//2
-    píxeles) para no devolver variantes del mismo pico.
-
-    Args:
-        result_map: Mapa de correlación (H', W') float32.
-        image_mask: Máscara binaria de la imagen (H, W) uint8.
-        tmpl_h, tmpl_w: Dimensiones del template.
-        n: Número máximo de candidatos a devolver.
-        min_overlap_ratio: Fracción mínima del template con píxeles de forma.
-
-    Returns:
-        Lista de ((col, row), score_forma) ordenada de mayor a menor score.
+    Devuelve máscara booleana de píxeles verdes que corresponden a la marca
+    de agua / precipitación débil umbralada (verde dominante en rango fijo).
     """
-    tmpl_area = tmpl_h * tmpl_w
-    safe_map = result_map.copy()
-    safe_map[~np.isfinite(safe_map)] = -1.0
-
-    flat = safe_map.flatten()
-    pool_size = min(n * 20, flat.size)
-    top_indices = np.argpartition(flat, -pool_size)[-pool_size:]
-    top_indices = top_indices[np.argsort(flat[top_indices])[::-1]]
-
-    img_h, img_w = image_mask.shape
-    min_dist = max(tmpl_w, tmpl_h) // 2
-    accepted: list[tuple[tuple, float]] = []
-
-    for idx in top_indices:
-        if len(accepted) >= n:
-            break
-        score = float(flat[idx])
-        if score < 0:
-            break
-
-        row = int(idx // safe_map.shape[1])
-        col = int(idx % safe_map.shape[1])
-
-        # Filtro overlap
-        r0, r1 = row, min(row + tmpl_h, img_h)
-        c0, c1 = col, min(col + tmpl_w, img_w)
-        ratio = int(np.count_nonzero(image_mask[r0:r1, c0:c1])) / tmpl_area
-        if ratio < min_overlap_ratio:
-            continue
-
-        # Filtro distancia (evitar duplicados del mismo pico)
-        too_close = any(
-            abs(col - ac) < min_dist and abs(row - ar) < min_dist
-            for (ac, ar), _ in accepted
-        )
-        if too_close:
-            continue
-
-        accepted.append(((col, row), score))
-
-    return accepted
-
-
-def color_chaos_score(
-    png_arr: np.ndarray,
-    image_mask: np.ndarray,
-    top_left: tuple,
-    tmpl_h: int,
-    tmpl_w: int,
-) -> float:
-    """
-    Mide el "caos cromático" en la región del match propuesta.
-
-    El eco fijo es ruido electromagnético de terreno: devuelve señales
-    incoherentes pintadas con colores aleatorios y fragmentados, sin patrón
-    cromático dominante. La precipitación real tiene colores coherentes y
-    graduales (verde → amarillo → rojo).
-
-    Métricas combinadas (todas normalizadas a [0, 1]):
-
-    1. Diversidad de colores cuantizados:
-       Reduce la paleta a 8 niveles por canal y cuenta combinaciones únicas.
-       Más colores distintos → más caos.
-
-    2. Varianza espacial local (gradiente promedio):
-       Gradiente Sobel en la región. Alta varianza → píxeles vecinos muy
-       diferentes → caos.
-
-    3. Ausencia de color dominante (entropía del tono Hue en HSV):
-       Distribución plana de tonos → alta entropía → caos. Precipitación
-       real concentra verde o amarillo.
-
-    Solo se evalúan los píxeles que son forma (image_mask == 255) dentro
-    de la ventana del candidato.
-
-    Args:
-        png_arr: Array original con color (H, W, C) uint8.
-        image_mask: Máscara binaria de la imagen (H, W) uint8.
-        top_left: (col, row) esquina superior izquierda del candidato.
-        tmpl_h, tmpl_w: Dimensiones del template.
-
-    Returns:
-        float en [0, 1]: 0 = zona uniforme/monocromática, 1 = máximo caos.
-    """
-    col, row = int(top_left[0]), int(top_left[1])
-    img_h, img_w = png_arr.shape[:2]
-
-    r0 = max(row, 0)
-    r1 = min(row + tmpl_h, img_h)
-    c0 = max(col, 0)
-    c1 = min(col + tmpl_w, img_w)
-
-    if r1 <= r0 or c1 <= c0:
-        return 0.0
-
-    region_color = png_arr[r0:r1, c0:c1]
-    region_mask  = image_mask[r0:r1, c0:c1]
-
-    form_pixels = np.count_nonzero(region_mask)
-    if form_pixels < 20:
-        return 0.0
-
-    mask_bool = region_mask == 255
-    rgb = region_color[:, :, :3][mask_bool] if region_color.ndim == 3 else np.stack(
-        [region_color[mask_bool]] * 3, axis=1
+    rgb = arr[:, :, :3].astype(np.int16)
+    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+    mask = (
+        (g > r + WATERMARK_DOMINANCE) &
+        (g > b + WATERMARK_DOMINANCE) &
+        (g >= WATERMARK_GREEN_MIN) &
+        (g <= WATERMARK_GREEN_MAX)
     )
+    logger.debug("  Filtro marca de agua: %d píxeles", int(np.count_nonzero(mask)))
+    return mask
 
-    # ── Métrica 1: diversidad de colores cuantizados ──────────────────────
-    quant = (rgb // 32).astype(np.int32)
-    color_ids = quant[:, 0] * 64 + quant[:, 1] * 8 + quant[:, 2]
-    diversity_score = min(len(np.unique(color_ids)) / MIN_UNIQUE_COLORS, 1.0)
 
-    # ── Métrica 2: varianza LOCAL píxel a píxel (ventana 3x3) ────────────────
-    # El eco fijo cambia de color abruptamente entre píxeles vecinos (ruido puro).
-    # La precipitación intensa también tiene colores mezclados, pero con transiciones
-    # suaves a escala de píxel. La varianza en ventanas 3x3 captura exactamente
-    # esa diferencia: alta en eco fijo, moderada incluso en tormentas fuertes.
-    gray_region = cv2.cvtColor(
-        region_color[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2GRAY
-    ).astype(np.float32)
+# ── Verificación de forma (IoU + Correlación) ────────────────────────────────
 
-    kernel = np.ones((3, 3), dtype=np.float32) / 9.0
-    mean_local  = cv2.filter2D(gray_region, -1, kernel)
-    mean2_local = cv2.filter2D(gray_region ** 2, -1, kernel)
-    var_local   = np.maximum(mean2_local - mean_local ** 2, 0.0)
+def _extract_region(image_mask: np.ndarray, top_left: tuple,
+                    tmpl_h: int, tmpl_w: int) -> np.ndarray:
+    col0, row0 = int(top_left[0]), int(top_left[1])
+    ih, iw = image_mask.shape[:2]
+    r0, r1 = max(row0, 0), min(row0 + tmpl_h, ih)
+    c0, c1 = max(col0, 0), min(col0 + tmpl_w, iw)
+    mr0, mc0 = r0 - row0, c0 - col0
+    region = np.zeros((tmpl_h, tmpl_w), dtype=np.uint8)
+    if r1 > r0 and c1 > c0:
+        region[mr0:mr0 + (r1 - r0), mc0:mc0 + (c1 - c0)] = image_mask[r0:r1, c0:c1]
+    return region
 
-    mean_var = float(var_local[mask_bool].mean()) if form_pixels > 0 else 0.0
-    local_var_score = min(mean_var / 200.0, 1.0)
 
-    # ── Métrica 3: entropía del tono (Hue) ───────────────────────────────
-    hsv_img = cv2.cvtColor(region_color[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2HSV)
-    hue_vals = hsv_img[:, :, 0][mask_bool]
-    sat_vals  = hsv_img[:, :, 1][mask_bool]
-    colored   = hue_vals[sat_vals > 30]
+def verify_iou(image_mask: np.ndarray, template_mask: np.ndarray,
+               top_left: tuple) -> tuple[float, bool]:
+    th, tw = template_mask.shape[:2]
+    region = _extract_region(image_mask, top_left, th, tw)
+    a, b = region == 255, template_mask == 255
+    union = np.logical_or(a, b).sum()
+    iou = float(np.logical_and(a, b).sum()) / float(union) if union > 0 else 0.0
+    return iou, iou >= MIN_SHAPE_IOU
 
-    if len(colored) > 10:
-        hist, _ = np.histogram(colored, bins=18, range=(0, 180))
-        p = hist.astype(np.float32)
-        p = p[p > 0] / p.sum()
-        entropy_score = min(float(-np.sum(p * np.log2(p))) / np.log2(18), 1.0)
-    else:
-        entropy_score = 0.0
 
-    chaos = (diversity_score + local_var_score + entropy_score) / 3.0
-    logger.debug(
-        "      caos @ (%d,%d): div=%.3f grad=%.3f entr=%.3f → %.3f",
-        col, row, diversity_score, local_var_score, entropy_score, chaos,
-    )
-    return chaos
+def verify_corr(image_mask: np.ndarray, template_mask: np.ndarray,
+                top_left: tuple) -> tuple[float, bool]:
+    th, tw = template_mask.shape[:2]
+    region = _extract_region(image_mask, top_left, th, tw).astype(np.float32)
+    tmpl = template_mask.astype(np.float32)
+    try:
+        corr = float(cv2.matchTemplate(region, tmpl, cv2.TM_CCOEFF_NORMED)[0, 0])
+    except Exception:
+        r, t = region.flatten(), tmpl.flatten()
+        corr = float(np.corrcoef(r, t)[0, 1]) if r.std() > 0 and t.std() > 0 else 0.0
+    return corr, corr >= MIN_GLOBAL_CORR
+
+
+# ── Template matching en cascada ──────────────────────────────────────────────
+
+def _compute_result_maps(image_f: np.ndarray, template_f: np.ndarray,
+                         template_mask: np.ndarray) -> list:
+    """Calcula mapas de correlación disponibles (masked y/o classic)."""
+    maps = []
+    if np.count_nonzero(template_mask) > 0:
+        try:
+            maps.append(("masked", cv2.matchTemplate(
+                image_f, template_f, cv2.TM_CCORR_NORMED,
+                mask=template_mask.astype(np.float32),
+            )))
+        except cv2.error:
+            pass
+    try:
+        maps.append(("classic", cv2.matchTemplate(image_f, template_f, cv2.TM_CCOEFF_NORMED)))
+    except cv2.error:
+        pass
+    return maps
+
+
+def _scan_zone(result_map: np.ndarray, image_mask: np.ndarray,
+               template_mask: np.ndarray, zone_width: float,
+               label: str, strict: bool = True):
+    """
+    Escanea izquierda→derecha hasta zone_width.
+    strict=True: exige IoU+Corr válidos.
+    strict=False: devuelve el mejor score sin verificar forma.
+    """
+    safe = result_map.copy()
+    safe[~np.isfinite(safe)] = -1.0
+    ih, iw = image_mask.shape
+    th, tw = template_mask.shape[:2]
+    n_cols = safe.shape[1]
+    max_col = max(1, int(n_cols * zone_width))
+    min_overlap = max(int(th * tw * 0.05), 10)
+
+    if not strict:
+        zone = safe[:, :max_col]
+        idx = int(np.argmax(zone))
+        row, col = idx // zone.shape[1], idx % zone.shape[1]
+        score = float(zone[row, col])
+        return ((col, row), score, f"{label}_raw") if score >= 0 else None
+
+    for col in range(max_col):
+        best_row = int(np.argmax(safe[:, col]))
+        score = float(safe[best_row, col])
+        if score < MIN_MATCH_SCORE:
+            continue
+        r1 = min(best_row + th, ih)
+        c1 = min(col + tw, iw)
+        if np.count_nonzero(image_mask[best_row:r1, col:c1]) < min_overlap:
+            continue
+        top_left = (col, best_row)
+        iou, iou_ok = verify_iou(image_mask, template_mask, top_left)
+        corr, corr_ok = verify_corr(image_mask, template_mask, top_left)
+        if iou_ok and corr_ok:
+            logger.info("    [%s z=%.2f] score=%.4f @ (%d,%d)", label, zone_width, score, col, best_row)
+            return top_left, score, f"{label}_z{int(zone_width*100)}"
+    return None
+
+
+def _find_match_for_width(image_mask: np.ndarray, template_mask: np.ndarray,
+                          result_maps: list, zone_width: float,
+                          strict: bool = True):
+    """Prueba los mapas en orden; devuelve el primer match encontrado o None."""
+    for label, rmap in result_maps:
+        match = _scan_zone(rmap, image_mask, template_mask, zone_width, label, strict)
+        if match:
+            return match
+    return None
 
 
 def match_template_binary(
     image_mask: np.ndarray,
     template_mask: np.ndarray,
-    png_arr: np.ndarray | None = None,
+    png_arr: np.ndarray | None = None,  # mantenido por compatibilidad, no usado
 ) -> tuple[tuple[int, int], float, str]:
     """
-    Template matching sobre máscaras binarias con estrategia dinámica en cascada,
-    seguido de validación por caos cromático cuando png_arr está disponible.
+    Template matching sobre máscaras binarias con estrategia en cascada.
 
-    Problema que resuelve:
-        TM_CCOEFF_NORMED compara pixel a pixel TODO el template contra la ventana
-        de la imagen, incluyendo el fondo negro. Si hay precipitación/nubes cerca
-        del eco fijo, el fondo del template no coincide con las nubes, bajando
-        el score aunque la FORMA coincida.
-
-        Adicionalmente, zonas de precipitación densa pueden tener forma binaria
-        similar al eco fijo y "ganar" el matching. La validación por caos cromático
-        descarta esas zonas: precipitación real = colores coherentes; eco fijo =
-        colores caóticos y fragmentados.
-
-    Estrategia:
-        1. MASKED (TM_CCORR_NORMED + máscara de forma): ignora el fondo negro.
-        2. CLASSIC (TM_CCOEFF_NORMED sin máscara): más robusto numéricamente.
-        3. POOL UNIFICADO: se fusionan los top-COLOR_CANDIDATES de ambos métodos,
-           se evalúa el caos cromático de cada posición única y se elige el
-           candidato con mayor score combinado:
-               score_combinado = (1 - COLOR_CHAOS_WEIGHT) * score_forma
-                               + COLOR_CHAOS_WEIGHT * score_caos
-           Si png_arr no está disponible, se usa solo el mejor score de forma
-           (comportamiento original).
+    Recorre anchos 10%→100%. Si el mismo (col, row) aparece dos veces
+    consecutivas con al menos un match strict (IoU+Corr) → confirmado.
+    Si no hay confirmación → usa el mejor strict; si no hay ninguno, el mejor raw.
+    Fallback global a z=0.50 si ningún ancho da resultado.
 
     Args:
         image_mask: Máscara de la imagen de radar (H, W) uint8.
-        template_mask: Máscara del eco fijo (h, w) uint8 con h<H y w<W.
-        png_arr: Array original con color (H, W, C) uint8, opcional.
-                 Si se provee, activa la validación por caos cromático.
+        template_mask: Máscara del eco fijo (h, w) uint8.
+        png_arr: No usado (mantenido por compatibilidad con firma anterior).
 
     Returns:
         Tupla ((col, fila), score_forma, method_used).
     """
-    image_f   = image_mask.astype(np.float32)
+    image_f    = image_mask.astype(np.float32)
     template_f = template_mask.astype(np.float32)
-    tmpl_h, tmpl_w = template_mask.shape[:2]
+    result_maps = _compute_result_maps(image_f, template_f, template_mask)
 
-    raw_results: dict[str, list[tuple[tuple, float]]] = {}
-
-    # ── Método 1: Masked (TM_CCORR_NORMED + máscara) ─────────────────────────
-    if np.count_nonzero(template_mask) > 0:
-        try:
-            result_masked = cv2.matchTemplate(
-                image_f, template_f, cv2.TM_CCORR_NORMED,
-                mask=template_mask.astype(np.float32),
-            )
-            candidates_m = _top_candidates_from_result(
-                result_masked, image_mask, tmpl_h, tmpl_w, COLOR_CANDIDATES
-            )
-            if candidates_m:
-                raw_results["masked"] = candidates_m
-                logger.debug("    [masked] top: score=%.4f @ %s", candidates_m[0][1], candidates_m[0][0])
-        except cv2.error as exc:
-            logger.warning("    Masked matching no disponible: %s", exc)
-
-    # ── Método 2: Classic (TM_CCOEFF_NORMED sin máscara) ─────────────────────
-    try:
-        result_classic = cv2.matchTemplate(image_f, template_f, cv2.TM_CCOEFF_NORMED)
-        candidates_c = _top_candidates_from_result(
-            result_classic, image_mask, tmpl_h, tmpl_w, COLOR_CANDIDATES
-        )
-        if candidates_c:
-            raw_results["classic"] = candidates_c
-            logger.debug("    [classic] top: score=%.4f @ %s", candidates_c[0][1], candidates_c[0][0])
-    except cv2.error as exc:
-        logger.warning("    Classic matching falló: %s", exc)
-
-    if not raw_results:
+    if not result_maps:
         raise RuntimeError("Todos los métodos de template matching fallaron.")
 
-    # ── Pool unificado: fusionar candidatos de ambos métodos ──────────────────
-    # Para posiciones solapadas se conserva el mayor score de forma.
-    min_dist = max(tmpl_w, tmpl_h) // 2
-    unified: dict[tuple, tuple[float, str]] = {}  # loc → (score_forma, method)
+    results, prev = [], None
 
-    for method_name, candidates in raw_results.items():
-        for loc, score_forma in candidates:
-            if not _valid_score(score_forma):
-                continue
-            merged = False
-            for existing_loc in list(unified.keys()):
-                if abs(loc[0] - existing_loc[0]) < min_dist and abs(loc[1] - existing_loc[1]) < min_dist:
-                    if score_forma > unified[existing_loc][0]:
-                        unified[existing_loc] = (score_forma, method_name)
-                    merged = True
-                    break
-            if not merged:
-                unified[loc] = (score_forma, method_name)
+    for width in ANCHOS:
+        strict_match = _find_match_for_width(image_mask, template_mask, result_maps, width, strict=True)
+        match = strict_match or _find_match_for_width(image_mask, template_mask, result_maps, width, strict=False)
+        is_strict = strict_match is not None
 
-    logger.debug("    Pool unificado: %d candidatos únicos", len(unified))
-
-    # ── Selección por score combinado (forma + caos cromático) ────────────────
-    best_loc: tuple | None = None
-    best_score_forma = -1.0
-    best_combined    = -1.0
-    best_method      = ""
-
-    for loc, (score_forma, method_name) in unified.items():
-        if png_arr is not None:
-            chaos    = color_chaos_score(png_arr, image_mask, loc, tmpl_h, tmpl_w)
-            combined = (1.0 - COLOR_CHAOS_WEIGHT) * score_forma + COLOR_CHAOS_WEIGHT * chaos
+        if match:
+            (col, row), score, method = match
+            logger.info("  [z=%.2f] (%d,%d) score=%.4f [%s] strict=%s",
+                        width, col, row, score, method, is_strict)
+            if prev and col == prev[0] and row == prev[1]:
+                if is_strict or prev[5]:
+                    logger.info("  ✓ CONFIRMADO en z=%.2f y z=%.2f @ (%d,%d)",
+                                prev[3], width, col, row)
+                    return (col, row), score, f"{method}_confirmed"
+                else:
+                    logger.info("  ~ repetición raw+raw ignorada @ (%d,%d)", col, row)
+            results.append((col, row, score, width, method, is_strict))
+            prev = (col, row, score, width, method, is_strict)
         else:
-            chaos    = float("nan")
-            combined = score_forma
+            logger.info("  [z=%.2f] sin match", width)
+            prev = None
 
-        chaos_str = f"{chaos:.3f}" if not np.isnan(chaos) else "n/a"
-        logger.debug(
-            "      [%s] loc=%s forma=%.4f caos=%s combinado=%.4f",
-            method_name, loc, score_forma, chaos_str, combined,
-        )
+    if results:
+        strict_results = [r for r in results if r[5]]
+        pool = strict_results if strict_results else results
+        best = max(pool, key=lambda r: r[2])
+        logger.warning("  Sin confirmación. Mejor%s: z=%.2f @ (%d,%d)",
+                       "(strict)" if strict_results else "(raw)",
+                       best[3], best[0], best[1])
+        return (best[0], best[1]), best[2], f"{best[4]}_best"
 
-        if combined > best_combined:
-            best_combined    = combined
-            best_score_forma = score_forma
-            best_loc         = loc
-            best_method      = method_name
+    # Fallback global
+    logger.warning("  Ningún ancho dio match. Fallback global z=0.50.")
+    for label, rmap in result_maps:
+        match = _scan_zone(rmap, image_mask, template_mask, 0.50, label, strict=False)
+        if match:
+            (col, row), score, _ = match
+            iou, iou_ok = verify_iou(image_mask, template_mask, (col, row))
+            corr, corr_ok = verify_corr(image_mask, template_mask, (col, row))
+            status = ("fallback_ok"
+                      if (score >= MIN_MATCH_SCORE_GLOBAL and iou_ok and corr_ok)
+                      else "fallback_unreliable")
+            return (col, row), score, status
 
-    # Fallback extremo (no debería ocurrir)
-    if best_loc is None:
-        for method_name, candidates in raw_results.items():
-            if candidates:
-                loc, score_forma = candidates[0]
-                if _valid_score(score_forma) and score_forma > best_score_forma:
-                    best_score_forma = score_forma
-                    best_loc         = loc
-                    best_method      = method_name
+    logger.warning("  Fallback sin resultado. Devolviendo (0,0).")
+    return (0, 0), 0.0, "fallback"
 
-    if best_loc is None:
-        logger.warning("No se encontró ningún candidato válido. Devolviendo (0,0).")
-        best_loc         = (0, 0)
-        best_score_forma = 0.0
-        best_method      = "fallback"
 
-    logger.info(
-        "Match → [%s] score_forma=%.4f score_combinado=%.4f @ %s",
-        best_method, best_score_forma, best_combined, best_loc,
-    )
-    return best_loc, best_score_forma, best_method
+# ── Selección entre múltiples templates eco ───────────────────────────────────
 
+def _best_eco_match(png_mask: np.ndarray, results: list) -> dict:
+    """
+    Elige el mejor match entre múltiples templates eco.
+
+    Reglas (en orden):
+    1. Si dos o más coinciden en (col, row) → ese es el eco (máxima confianza).
+    2. Si no coinciden → el que tenga mejor IoU × Corr combinado.
+    """
+    if len(results) == 1:
+        return results[0]
+
+    # Regla 1: coincidencia de posición
+    for i, a in enumerate(results):
+        for b in results[i + 1:]:
+            if a["col"] == b["col"] and a["row"] == b["row"]:
+                logger.info("  ✓ COINCIDENCIA entre templates @ (%d,%d)", a["col"], a["row"])
+                return a if a["score"] >= b["score"] else b
+
+    # Regla 2: mejor IoU × Corr
+    for r in results:
+        iou, _ = verify_iou(r["png_mask"], r["eco_mask"], (r["col"], r["row"]))
+        corr, _ = verify_corr(r["png_mask"], r["eco_mask"], (r["col"], r["row"]))
+        r["forma"] = iou * corr
+
+    best = max(results, key=lambda r: r["forma"])
+    logger.info("  Sin coincidencia. Mejor forma: %s IoU×Corr=%.4f @ (%d,%d)",
+                best["template"], best["forma"], best["col"], best["row"])
+    return best
+
+
+# ── Geo helpers ───────────────────────────────────────────────────────────────
 
 def pixel_to_geo(transform: Affine, col: float, row: float) -> tuple[float, float]:
-    """
-    Convierte coordenadas de píxel a coordenadas geográficas usando el Affine Transform.
-
-    Args:
-        transform: Transform affine del raster.
-        col: Columna (eje X).
-        row: Fila (eje Y).
-
-    Returns:
-        Tupla (longitud, latitud).
-    """
+    """Convierte coordenadas de píxel a coordenadas geográficas."""
     lon, lat = transform * (col, row)
     return lon, lat
 
 
-def get_center_geo(
-    transform: Affine, width: int, height: int
-) -> tuple[float, float]:
-    """
-    Calcula las coordenadas geográficas del centro exacto de un raster.
-
-    Args:
-        transform: Transform affine del raster.
-        width: Ancho en píxeles.
-        height: Alto en píxeles.
-
-    Returns:
-        Tupla (longitud, latitud) del centro.
-    """
+def get_center_geo(transform: Affine, width: int, height: int) -> tuple[float, float]:
+    """Calcula las coordenadas geográficas del centro exacto de un raster."""
     center_col = (width - 1) / 2.0
     center_row = (height - 1) / 2.0
     return pixel_to_geo(transform, center_col, center_row)
@@ -530,17 +375,7 @@ def correct_transform(
     delta_lon: float,
     delta_lat: float,
 ) -> Affine:
-    """
-    Corrige el Affine Transform sumando el delta al origen (c, f).
-
-    Args:
-        original_transform: Transform affine original del template de referencia.
-        delta_lon: Desplazamiento en longitud (grados).
-        delta_lat: Desplazamiento en latitud (grados).
-
-    Returns:
-        Nuevo Affine Transform corregido.
-    """
+    """Corrige el Affine Transform sumando el delta al origen (c, f)."""
     a, b, c, d, e, f = original_transform[:6]
     return Affine(a, b, c + delta_lon, d, e, f + delta_lat)
 
@@ -552,19 +387,7 @@ def array_to_geotiff_bytes(
     compress: str = COMPRESS,
     nodata: int | None = 0,
 ) -> bytes:
-    """
-    Convierte un array numpy a bytes de GeoTIFF en memoria (sin escribir a disco).
-
-    Args:
-        arr: Array (H, W) o (H, W, C) uint8.
-        transform: Affine Transform corregido.
-        crs: Sistema de referencia de coordenadas (ej: EPSG:4326).
-        compress: Algoritmo de compresión ('lzw', 'deflate', 'none').
-        nodata: Valor NoData del raster (default=0, píxel negro = sin datos).
-
-    Returns:
-        Bytes del GeoTIFF listo para persistir en base de datos.
-    """
+    """Convierte un array numpy a bytes de GeoTIFF en memoria (sin escribir a disco)."""
     if arr.ndim == 3:
         height, width, count = arr.shape
         bands = [arr[:, :, i] for i in range(count)]
@@ -575,17 +398,10 @@ def array_to_geotiff_bytes(
 
     buffer = io.BytesIO()
     with rasterio.open(
-        buffer,
-        "w",
-        driver="GTiff",
-        height=height,
-        width=width,
-        count=count,
-        dtype=arr.dtype,
-        crs=crs,
-        transform=transform,
-        compress=compress,
-        nodata=nodata,
+        buffer, "w", driver="GTiff",
+        height=height, width=width, count=count,
+        dtype=arr.dtype, crs=crs, transform=transform,
+        compress=compress, nodata=nodata,
     ) as dst:
         for i, band in enumerate(bands, start=1):
             dst.write(band, i)
@@ -606,7 +422,7 @@ class GeoResultado:
         "score_match",
         "delta_lon",
         "delta_lat",
-        "clutter_mask",  # máscara booleana H×W de ecos fijos en la imagen
+        "clutter_mask",
     )
 
     def __init__(
@@ -636,111 +452,167 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
     1. Elegir template de georreferencia (tif700 o tif800) según ancho.
     2. Leer CRS y Transform del template.
     3. Extraer máscara de forma del array.
-    4. Cargar template_eco_fijo y extraer su máscara de forma.
-    5. Template matching en cascada (masked → classic) con validación por caos
-       cromático: el eco fijo tiene colores caóticos (ruido de terreno), mientras
-       que la precipitación real tiene colores coherentes. Se fusionan los
-       candidatos de ambos métodos y se elige el de mayor score combinado
-       (forma + caos).
-    6. Calcular delta geográfico entre posición encontrada y posición real.
+    4. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
+    5. Template matching en cascada (masked → classic) con verificación
+       de forma (IoU + Corr) por ancho incremental. Se corre para cada
+       template eco y se elige el mejor match.
+    6. Calcular delta geográfico entre posición encontrada y real.
     7. Corregir el Affine Transform.
-    8. Construir máscara booleana de clutter (ecos fijos) en coordenadas de imagen.
-    9. Generar GeoTIFF final en memoria (BytesIO), con píxeles de clutter
-       puestos a 0 (NoData) para que no aparezcan como precipitación real.
+    8. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
+       sin margen rectangular para no eliminar tormenta real adyacente.
+    9. Aplicar filtros al array de salida:
+       - Poner a 0 los píxeles de eco fijo (clutter_mask, forma exacta).
+       - Poner a 0 los píxeles con color de dBZ < 35.
+       - Poner a 0 los píxeles con color verde de marca de agua.
+    10. Generar GeoTIFF final en memoria (BytesIO).
 
     Args:
         filled_rgb: Array (H, W, 3) uint8. Imagen post-relleno de huecos.
 
     Returns:
-        GeoResultado con los bytes del GeoTIFF sin ecos fijos, metadatos de
+        GeoResultado con los bytes del GeoTIFF limpio, metadatos de
         geolocalización y clutter_mask (máscara booleana H×W de la zona de
-        ecos fijos, útil para métricas y template matching).
+        ecos fijos, útil para excluir del cálculo de dbz_max).
 
     Raises:
         FileNotFoundError: Si los templates no están en template_dir.
-        ValueError: Si el template eco es más grande que la imagen.
+        ValueError: Si todos los templates eco son más grandes que la imagen.
         RuntimeError: Si todos los métodos de template matching fallan.
     """
     height, width = filled_rgb.shape[:2]
+    template_dir = Path(settings.template_dir)
 
-    # ── 1. Elegir templates ───────────────────────────────────────────────────
-    geo_path, eco_path = get_template_paths(width)
-    logger.info("Template geo: %s | Eco: %s", geo_path.name, eco_path.name)
+    # ── 1. Template de georreferencia ─────────────────────────────────────────
+    geo_name = "tif800.tif" if width > THRESHOLD_WIDTH else "tif700.tif"
+    geo_path = template_dir / geo_name
+    if not geo_path.exists():
+        raise FileNotFoundError(f"Template de georreferencia no encontrado: {geo_path}")
+    logger.info("Template geo: %s", geo_path.name)
 
-    # ── 2. Leer CRS y Transform de referencia ────────────────────────────────
+    # ── 2. CRS y Transform de referencia ─────────────────────────────────────
     with rasterio.open(geo_path) as src_geo:
         ref_transform = src_geo.transform
         ref_crs = src_geo.crs
     logger.info("CRS: %s | Transform: %s", ref_crs, ref_transform)
 
-    # ── 3. Extraer máscara de forma del array ─────────────────────────────────
+    # ── 3. Máscara de forma del array de entrada ──────────────────────────────
     png_mask = extract_shape_mask(filled_rgb)
 
-    # ── 4. Cargar eco fijo y su máscara ──────────────────────────────────────
-    with rasterio.open(eco_path) as src_eco:
-        eco_arr = np.moveaxis(src_eco.read(), 0, -1)  # (C, H, W) → (H, W, C)
-        eco_transform = src_eco.transform
-        eco_width = src_eco.width
-        eco_height = src_eco.height
+    # ── 4. Cargar todos los templates eco ────────────────────────────────────
+    eco_paths = _get_eco_template_paths(template_dir)
+    logger.info("Templates eco: %s", [p.name for p in eco_paths])
 
-    eco_mask = extract_shape_mask(eco_arr)
+    eco_data = []
+    for eco_path in eco_paths:
+        with rasterio.open(eco_path) as src_eco:
+            eco_arr       = np.moveaxis(src_eco.read(), 0, -1)  # (C,H,W)→(H,W,C)
+            eco_transform = src_eco.transform
+            eco_w         = src_eco.width
+            eco_h_px      = src_eco.height
+        eco_mask = extract_shape_mask(eco_arr)
+        eh, ew = eco_mask.shape
+        if eh > height or ew > width:
+            logger.warning("[%s] template más grande que imagen, ignorado", eco_path.name)
+            continue
+        eco_data.append({
+            "template":      eco_path.name,
+            "eco_mask":      eco_mask,
+            "eco_transform": eco_transform,
+            "eco_w":         eco_w,
+            "eco_h":         eco_h_px,
+        })
+        logger.info("[%s] mask: %d px activos", eco_path.name, int(np.count_nonzero(eco_mask)))
 
-    eco_h, eco_w = eco_mask.shape
-    if eco_h > height or eco_w > width:
-        raise ValueError(
-            f"Template eco ({eco_mask.shape}) mayor que la imagen ({png_mask.shape})."
-        )
+    if not eco_data:
+        raise ValueError("Ningún template eco es compatible con esta imagen (todos más grandes).")
 
-    # ── 5. Template matching con validación por caos cromático ───────────────
-    top_left, score, method_used = match_template_binary(png_mask, eco_mask, filled_rgb)
-    match_col, match_row = top_left
-    logger.info(
-        "Match: top_left=(%d, %d), score=%.4f, método=%s",
-        match_col, match_row, score, method_used,
-    )
+    # ── 5. Template matching para cada template eco ───────────────────────────
+    match_results = []
+    for eco in eco_data:
+        top_left, score, method = match_template_binary(png_mask, eco["eco_mask"])
+        col, row = top_left
+        logger.info("[%s] (%d,%d) score=%.4f method=%s", eco["template"], col, row, score, method)
+        match_results.append({
+            "template":      eco["template"],
+            "col":           col,
+            "row":           row,
+            "score":         score,
+            "method":        method,
+            "eco_mask":      eco["eco_mask"],
+            "eco_transform": eco["eco_transform"],
+            "eco_w":         eco["eco_w"],
+            "eco_h":         eco["eco_h"],
+            "png_mask":      png_mask,
+        })
+
+    # ── Elegir el mejor match entre todos los templates ───────────────────────
+    best       = _best_eco_match(png_mask, match_results)
+    match_col  = best["col"]
+    match_row  = best["row"]
+    top_left   = (match_col, match_row)
+    score      = best["score"]
+    method     = best["method"]
+    eco_mask   = best["eco_mask"]
+    eco_transform = best["eco_transform"]
+    eco_w      = best["eco_w"]
+    eco_h      = best["eco_h"]
+
+    logger.info("Match final: (%d,%d) score=%.4f method=%s template=%s",
+                match_col, match_row, score, method, best["template"])
 
     if score < MIN_MATCH_SCORE:
-        logger.warning(
-            "Score bajo (%.4f < %.4f). Match puede ser incorrecto.",
-            score, MIN_MATCH_SCORE,
-        )
+        logger.warning("Score bajo (%.4f < %.4f). Match puede ser incorrecto.",
+                       score, MIN_MATCH_SCORE)
 
-    # ── 6. Calcular delta geográfico ──────────────────────────────────────────
-    eco_center_col = match_col + (eco_w - 1) / 2.0
-    eco_center_row = match_row + (eco_h - 1) / 2.0
+    unreliable = "unreliable" in method or method == "fallback"
 
-    eco_found_lon, eco_found_lat = pixel_to_geo(ref_transform, eco_center_col, eco_center_row)
-    eco_true_lon, eco_true_lat = get_center_geo(eco_transform, eco_width, eco_height)
+    # ── 6. Delta geográfico ───────────────────────────────────────────────────
+    if unreliable:
+        logger.warning("Fallback no confiable. Sin corrección geográfica.")
+        corrected_transform = ref_transform
+        delta_lon = 0.0
+        delta_lat = 0.0
+    else:
+        eco_center_col = match_col + (eco_w - 1) / 2.0
+        eco_center_row = match_row + (eco_h - 1) / 2.0
+        found_lon, found_lat = pixel_to_geo(ref_transform, eco_center_col, eco_center_row)
+        true_lon, true_lat   = get_center_geo(eco_transform, eco_w, eco_h)
+        delta_lon = true_lon - found_lon
+        delta_lat = true_lat - found_lat
+        logger.info("Δlon=%.6f, Δlat=%.6f", delta_lon, delta_lat)
 
-    delta_lon = eco_true_lon - eco_found_lon
-    delta_lat = eco_true_lat - eco_found_lat
-    logger.info("Δlon=%.4f, Δlat=%.4f", delta_lon, delta_lat)
+        # ── 7. Corregir Transform ─────────────────────────────────────────────
+        corrected_transform = correct_transform(ref_transform, delta_lon, delta_lat)
 
-    # ── 7. Corregir Transform ─────────────────────────────────────────────────
-    corrected_transform = correct_transform(ref_transform, delta_lon, delta_lat)
-
-    # ── 8. Construir máscara booleana de clutter ──────────────────────────────
-    # Solo se enmascaran los píxeles que son forma del eco (eco_mask > 0),
-    # no todo el bounding box, para no eliminar precipitación real adyacente.
+    # ── 8. Máscara de clutter por forma exacta del eco ───────────────────────
+    # Se usa la forma exacta del template (eco_mask > 0), NO un rectángulo
+    # con margen, para no eliminar precipitación real que pase sobre el eco.
     clutter_mask = np.zeros((height, width), dtype=bool)
     row_end = min(match_row + eco_h, height)
     col_end = min(match_col + eco_w, width)
     clutter_mask[match_row:row_end, match_col:col_end] = (
         eco_mask[:row_end - match_row, :col_end - match_col] > 0
     )
-    logger.info(
-        "clutter_mask: %d píxeles de eco fijo enmascarados",
-        int(np.count_nonzero(clutter_mask)),
-    )
+    logger.info("clutter_mask: %d px de eco fijo enmascarados",
+                int(np.count_nonzero(clutter_mask)))
 
-    # ── 9. Generar GeoTIFF final en memoria, sin ecos fijos ───────────────────
-    # Se trabaja sobre una copia para no modificar filled_rgb (el orquestador
-    # puede necesitarlo para métricas u otras fases del pipeline).
+    # ── 9. Filtros de salida ──────────────────────────────────────────────────
     export_rgb = filled_rgb.copy()
-    export_rgb[clutter_mask] = 0
-    logger.info("GeoTIFF exportado con ecos fijos enmascarados (NoData=0)")
 
+    # 9a. Eco fijo (forma exacta — sin margen rectangular)
+    export_rgb[clutter_mask] = 0
+
+    # 9b. dBZ < 35 (precipitación muy débil / ruido cromático)
+    export_rgb[build_dbz_below35_mask(export_rgb)] = 0
+
+    # 9c. Verdes de marca de agua / umbral de precipitación débil
+    export_rgb[build_watermark_mask(export_rgb)] = 0
+
+    logger.info("Filtros aplicados: eco_fijo + dBZ<35 + marca_agua")
+
+    # ── 10. GeoTIFF final en memoria ──────────────────────────────────────────
     geotiff_bytes = array_to_geotiff_bytes(export_rgb, corrected_transform, ref_crs)
+    logger.info("GeoTIFF exportado (ecos fijos + dbz<35 + watermark → NoData=0)")
 
     return GeoResultado(
         geotiff_bytes=geotiff_bytes,
