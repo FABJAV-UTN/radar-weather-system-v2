@@ -7,6 +7,7 @@ Corrige el Affine Transform de la imagen comparando la posición del eco fijo
 
 Sin I/O directo al pipeline principal: escribe el GeoTIFF final a un buffer
 BytesIO que se persiste en la base de datos.
+#checkpoint
 """
 from __future__ import annotations
 
