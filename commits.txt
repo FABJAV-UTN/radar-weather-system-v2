@@ -1,0 +1,572 @@
+fabjav@moccai-16:~/Documentos/pruebas-radar$ git log
+commit 8ba8e3f4bd812d7804f2bc97760e11f2a09d5802 (HEAD -> main, origin/main, origin/HEAD)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:52:21 2026 -0300
+
+    funcionando todo ok
+
+commit efb5a3653393552362b3f4baae8cc63b6959e046
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 23:00:03 2026 -0300
+
+    va por buen camino. chek
+
+commit 4253c15304692d1b911dc2609945198d2c1bfe39
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 22:16:09 2026 -0300
+
+    estado
+
+commit 72912464cb27accce5bc890b5c9329b9e0eb9523
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:36:46 2026 -0300
+
+:...skipping...
+commit 8ba8e3f4bd812d7804f2bc97760e11f2a09d5802 (HEAD -> main, origin/main, origin/HEAD)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:52:21 2026 -0300
+
+    funcionando todo ok
+
+commit efb5a3653393552362b3f4baae8cc63b6959e046
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 23:00:03 2026 -0300
+
+    va por buen camino. chek
+
+commit 4253c15304692d1b911dc2609945198d2c1bfe39
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 22:16:09 2026 -0300
+
+    estado
+
+commit 72912464cb27accce5bc890b5c9329b9e0eb9523
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:36:46 2026 -0300
+
+    checkpoint seguro. modo normal no matchea bien pero anda
+
+commit 535b4ad8c9c5d5153715006f54b5b130dfab01ba
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:11:29 2026 -0300
+
+    lo mismo
+
+commit ae0d1210184892f990a7c59af13532ccee859563
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:10:57 2026 -0300
+
+    checkpoint. estado: debug visual con true
+
+commit 1ca34c076ea10d446643cfdc86a6c55035ac3825
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 15:25:43 2026 -0300
+
+    creé carpetas
+
+commit e64c2d77ecf0a4ff0fee3636361bfb399f6f3f73
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 02:21:28 2026 -0300
+
+    anda mal la geolocalizacion
+
+commit 7304aecc3f1fe345c5c7a4a977821056d9ac8b98
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 00:15:34 2026 -0300
+
+    geo modificado. mejor debug png
+
+commit 978d36ab5adb0da505a000266ead70f1fcec26c1
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 19:33:39 2026 -0300
+:
+
+
+
+
+
+
+fabjav@moccai-16:~/Documentos/radar-weather-system-v2$ git log
+commit a72ad48632d6a4413679afa6a2f45eddad598e7d (HEAD -> main, origin/main, origin/HEAD)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:53:17 2026 -0300
+
+    subsistema 1 funcionando full
+
+commit db44f81b8e3c368b6bf7386737f6de5e93cd287c
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:06:41 2026 -0300
+
+    checkpoint. geolocaliando 10/10. permitido inicar el subnproecso2
+
+commit 6d7c8dc5ed4dc1d0b7c5395144847833e512f4a3
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 02:21:00 2026 -0300
+
+    la gelolicaziones anda mal
+
+commit 48bad57079f5071aee0c08c99e73881e7b7f798c
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 01:59:24 2026 -0300
+
+:...skipping...
+commit a72ad48632d6a4413679afa6a2f45eddad598e7d (HEAD -> main, origin/main, origin/HEAD)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:53:17 2026 -0300
+
+    subsistema 1 funcionando full
+
+commit db44f81b8e3c368b6bf7386737f6de5e93cd287c
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:06:41 2026 -0300
+
+    checkpoint. geolocaliando 10/10. permitido inicar el subnproecso2
+
+commit 6d7c8dc5ed4dc1d0b7c5395144847833e512f4a3
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 02:21:00 2026 -0300
+
+    la gelolicaziones anda mal
+
+commit 48bad57079f5071aee0c08c99e73881e7b7f798c
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 01:59:24 2026 -0300
+
+    eco fijo bien localizado
+
+commit 9214f3b633891866d63e34e4b9c57df3c9d149ba
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 00:47:06 2026 -0300
+
+    se quitó la barra. se mejoró el frontend
+
+commit be5d4487a9ed77ea9e56f68687659c606f277b36
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 00:15:06 2026 -0300
+
+    endpoing procesamiento local individual anulado. checkpoint
+
+commit fd744a8085f8425c486030b122ffbdad84073927
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon Jun 1 23:12:05 2026 -0300
+
+    hora correcta en tif
+
+commit 54bb3a2a3213b4ec1dddb1a5cb0aa17dd957c73b
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon Jun 1 23:10:24 2026 -0300
+
+    buena geolocalización. checkpoint
+
+commit dc5916b349ef0ef933d7ea5e1564483ba60d96af
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 13:50:23 2026 -0300
+
+    checkpoint
+
+commit d76baba8c2ee01809462673c734f08e61fa5abee
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 13:23:46 2026 -0300
+:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+commit a72ad48632d6a4413679afa6a2f45eddad598e7d (HEAD -> main, origin/main, origin/HEAD)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:53:17 2026 -0300
+
+    subsistema 1 funcionando full
+
+commit db44f81b8e3c368b6bf7386737f6de5e93cd287c
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:06:41 2026 -0300
+
+    checkpoint. geolocaliando 10/10. permitido inicar el subnproecso2
+
+commit 6d7c8dc5ed4dc1d0b7c5395144847833e512f4a3
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 02:21:00 2026 -0300
+
+    la gelolicaziones anda mal
+
+commit 48bad57079f5071aee0c08c99e73881e7b7f798c
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 01:59:24 2026 -0300
+
+    eco fijo bien localizado
+
+commit 9214f3b633891866d63e34e4b9c57df3c9d149ba
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 00:47:06 2026 -0300
+
+    se quitó la barra. se mejoró el frontend
+
+commit be5d4487a9ed77ea9e56f68687659c606f277b36
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 00:15:06 2026 -0300
+
+    endpoing procesamiento local individual anulado. checkpoint
+
+commit fd744a8085f8425c486030b122ffbdad84073927
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon Jun 1 23:12:05 2026 -0300
+
+    hora correcta en tif
+
+commit 54bb3a2a3213b4ec1dddb1a5cb0aa17dd957c73b
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon Jun 1 23:10:24 2026 -0300
+
+    buena geolocalización. checkpoint
+
+commit dc5916b349ef0ef933d7ea5e1564483ba60d96af
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 13:50:23 2026 -0300
+
+    checkpoint
+
+commit d76baba8c2ee01809462673c734f08e61fa5abee
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 13:23:46 2026 -0300
+
+    procesamiento jsx modificado
+
+commit 76d54e9647e86099ca68f9247c67d630c195da4e
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 13:20:40 2026 -0300
+
+    procesamiento por lostes pesados andando
+
+commit 8fc042edfed7d3146c3cf03b45135047790e868b
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 10:45:45 2026 -0300
+
+    estado ok
+
+commit db7dcd09c195a2e3ac6b3fe7f5c51d9ab771f8be
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 29 00:45:11 2026 -0300
+
+    ahora la tabla se ordena correctamente y muestra el proceso de escaneado para lotes grandes
+
+commit e4c6799771ac15783484bf53dd5b0c2546ccfad6
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Thu May 28 14:07:38 2026 -0300
+
+    migración creado
+
+commit 68834bf552b45161607dbf755a121263d8e298b2
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Thu May 28 05:10:39 2026 -0300
+
+    md agregados
+
+commit 3693970ca93a6bd3175ed2088400ee274d081a76
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon May 25 18:23:10 2026 -0300
+
+    este punto ok. falta areglar el sort de filtrado
+
+commit 6c0d3ad9742c7eea9643066abe8377aa1b4bc29d
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon May 25 17:20:24 2026 -0300
+
+    todo andando. comit seguro
+
+commit f2f359415adda939740810d762b263dda911e156
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon May 25 03:25:56 2026 -0300
+
+    funcion el cancealar
+
+commit 706341d8825e6d74da2e71d0cfb522c04859e0c7
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Mon May 25 02:49:13 2026 -0300
+
+    procesamiento por lotes ok y ademas funciona en moviles
+
+commit 9522790e3e2c34dadc404d45360217c7346a96a8
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 20:06:22 2026 -0300
+
+    falta agregar scheduler y modificar codigo
+
+commit 982b73fdf8b2bc40c1099e1b436a854b2ec8d8ad
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 19:18:06 2026 -0300
+
+    frontend andando pero con error de carga de carpeta
+
+commit fe728676bb48ef7ef8142a6f13157dc0273c4559
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 18:31:48 2026 -0300
+
+    estado: andando
+
+commit fa77d99232f39cac8db2d97d74e324e68894d2f8
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 18:18:43 2026 -0300
+
+    procesamiento local andando...
+
+commit 846242ce87869943a45d8475212a21796fef9973 (origin/frontend)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 16:31:54 2026 -0300
+
+    frontend reataurado a estado 9
+
+commit b0e1900fe7bca8090a8f75d7208787cb97f07dcc
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 15:51:19 2026 -0300
+
+    que se yo
+
+commit c31f3d54589e50457da8d696db4393c2fd8a349a
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 03:15:45 2026 -0300
+
+    nada anda
+
+commit 6354482df8fd941a2f08e3b36c71219fe268aa24
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sun May 24 00:24:35 2026 -0300
+
+    local host 8000 andando
+
+commit 5cda1d0bf2a453ea9c6a76855b27cb769eaf462e
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 20:29:57 2026 -0300
+
+    chore: alembic + postgis + docker-compose funcionando
+
+commit 6a9839a762a96f7b965c61764211a022cfbcc8d3
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 20:15:25 2026 -0300
+
+    chore: setup inicial del ecosistema
+
+commit eb22f1dcfdc550bbc542c687bffdc3cedee5fc58
+Author: Fabio Javier <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 20:08:55 2026 -0300
+
+    Initial commit
+(END)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+commit 8ba8e3f4bd812d7804f2bc97760e11f2a09d5802 (HEAD -> main, origin/main, origin/HEAD)
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Wed Jun 3 01:52:21 2026 -0300
+
+    funcionando todo ok
+
+commit efb5a3653393552362b3f4baae8cc63b6959e046
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 23:00:03 2026 -0300
+
+    va por buen camino. chek
+
+commit 4253c15304692d1b911dc2609945198d2c1bfe39
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 22:16:09 2026 -0300
+
+    estado
+
+commit 72912464cb27accce5bc890b5c9329b9e0eb9523
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:36:46 2026 -0300
+
+    checkpoint seguro. modo normal no matchea bien pero anda
+
+commit 535b4ad8c9c5d5153715006f54b5b130dfab01ba
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:11:29 2026 -0300
+
+    lo mismo
+
+commit ae0d1210184892f990a7c59af13532ccee859563
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 21:10:57 2026 -0300
+
+    checkpoint. estado: debug visual con true
+
+commit 1ca34c076ea10d446643cfdc86a6c55035ac3825
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 15:25:43 2026 -0300
+
+    creé carpetas
+
+commit e64c2d77ecf0a4ff0fee3636361bfb399f6f3f73
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 02:21:28 2026 -0300
+
+    anda mal la geolocalizacion
+
+commit 7304aecc3f1fe345c5c7a4a977821056d9ac8b98
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Tue Jun 2 00:15:34 2026 -0300
+
+    geo modificado. mejor debug png
+
+commit 978d36ab5adb0da505a000266ead70f1fcec26c1
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 19:33:39 2026 -0300
+
+    corregido guia de desarrolldo
+
+commit 373faff1277a98b520a4d719b1aa00f5891de5bb
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 19:12:05 2026 -0300
+
+    guia test crado
+
+commit aabfd4c88105eff1492a59500ccd3734fd45107a
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 18:25:11 2026 -0300
+
+    pruebas terminadas
+
+commit 6e1ffb8d4e6e18b8fa00aedecc0fefbde60bf708
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 16:31:25 2026 -0300
+
+    correción crop y diagrama crop
+
+commit 5e89bb2b7595bdb3f13d2135e87c4e7d464eaa62
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Sat May 23 02:04:48 2026 -0300
+
+    crop, marco, geo y limpiar-> okok
+
+commit 76ec24c6be32e067898f9bf7bdeaf88133285153
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 22 16:20:11 2026 -0300
+
+    mm
+
+commit 0cb4ab48160c84ab9543b3b1b6c518f82f804ccb
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 22 14:54:29 2026 -0300
+
+    m
+
+commit 032912721dab76222a3148a90f5a3e960bfdfd33
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Fri May 22 01:48:53 2026 -0300
+
+    funcionan limpiar y rellenar
+
+commit 05813edaab905cc52313e9b97f6cea7628ad8cdc
+Author: FABJAV-UTN <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Thu May 21 18:50:06 2026 -0300
+
+    se agregaron archivos
+
+commit fe415dab14a09456d0f336b0193c859e8032fa12
+Author: Fabio Javier <41366311@alumnos.frsr.utn.edu.ar>
+Date:   Thu May 21 18:46:36 2026 -0300
+
+    Initial commit
+(END)
+

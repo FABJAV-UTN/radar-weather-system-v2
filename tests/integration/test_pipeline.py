@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -227,11 +228,38 @@ class TestIntegracionOrquestador:
             MockIntento.return_value = intento_inst
 
             repo_instance = AsyncMock()
-            repo_instance.existe_duplicado = AsyncMock(return_value=True)
+            repo_instance.obtener_por_fecha_hora = AsyncMock(return_value=SimpleNamespace(id=99, fecha_hora=ts_mock))
             MockImgRepo.return_value = repo_instance
 
-            with pytest.raises(ValueError, match="[Dd]uplicad"):
+            with pytest.raises(ValueError, match=r"Duplicado: URL '.*' timestamp=.*; ya existe imagen id=99 origen=url timestamp=.*"):
                 await ejecutar_pipeline_url(session)
+
+    @pytest.mark.asyncio
+    async def test_orquestador_pipeline_local_duplicado_rechazado(self, tmp_path):
+        """INT: Si la imagen local ya existe en DB, el pipeline rechaza con un mensaje claro."""
+        from src.subsistema1.orquestador import ejecutar_pipeline_local
+
+        imagen = _crear_imagen_sin_marco(300, 250)
+        gif_bytes = _gif_bytes(imagen)
+        archivo = tmp_path / "radar_20260523_143000.gif"
+        archivo.write_bytes(gif_bytes)
+
+        session = _mock_session()
+        ts_mock = datetime(2026, 5, 23, 14, 30, 0)
+
+        with (
+            patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
+            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository"),
+            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository"),
+            patch("src.subsistema1.orquestador.IntentoDescargaRepository"),
+            patch("src.subsistema1.orquestador.geolocalizar", return_value=_mock_geo_resultado()),
+        ):
+            repo_instance = AsyncMock()
+            repo_instance.obtener_por_fecha_hora = AsyncMock(return_value=SimpleNamespace(id=42, fecha_hora=ts_mock))
+            MockImgRepo.return_value = repo_instance
+
+            with pytest.raises(ValueError, match=r"Duplicado: archivo 'radar_20260523_143000.gif' timestamp=.*; ya existe imagen id=42 origen=local timestamp=.*"):
+                await ejecutar_pipeline_local(archivo, session)
 
     @pytest.mark.asyncio
     async def test_orquestador_pipeline_url_completo(self):

@@ -202,9 +202,15 @@ async def ejecutar_pipeline_local(
     )
 
     # Verificar duplicado con el timestamp correcto
-    if await img_repo.existe_duplicado(fecha_hora_final, "local"):
+    imagen_existente = await img_repo.obtener_por_fecha_hora(fecha_hora_final, "local")
+    if imagen_existente is not None:
+        mensaje = (
+            f"Duplicado: archivo '{file_path.name}' timestamp={fecha_hora_final.strftime('%Y-%m-%d %H:%M:%S')}; "
+            f"ya existe imagen id={imagen_existente.id} origen=local "
+            f"timestamp={imagen_existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
         logger.warning("Duplicado detectado: %s local", fecha_hora_final)
-        raise ValueError(f"Imagen duplicada para fecha_hora={fecha_hora_final} origen=local")
+        raise ValueError(mensaje)
 
     imagen = await img_repo.crear(fecha_hora_final, "local", ingesta.raw_bytes)
     imagen_id = imagen.id
@@ -255,9 +261,15 @@ async def ejecutar_pipeline_url(
         "url",
     )
 
-    if await img_repo.existe_duplicado(fecha_hora_final, "url"):
+    imagen_existente = await img_repo.obtener_por_fecha_hora(fecha_hora_final, "url")
+    if imagen_existente is not None:
+        mensaje = (
+            f"Duplicado: URL '{target_url}' timestamp={fecha_hora_final.strftime('%Y-%m-%d %H:%M:%S')}; "
+            f"ya existe imagen id={imagen_existente.id} origen=url "
+            f"timestamp={imagen_existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
         logger.warning("Duplicado URL detectado: %s", fecha_hora_final)
-        raise ValueError(f"Imagen duplicada para fecha_hora={fecha_hora_final} origen=url")
+        raise ValueError(mensaje)
 
     imagen = await img_repo.crear(fecha_hora_final, "url", ingesta.raw_bytes)
     imagen_id = imagen.id

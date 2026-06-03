@@ -70,6 +70,16 @@ class ImagenRadarRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def obtener_por_fecha_hora(self, fecha_hora: datetime, origen: str) -> ImagenRadar | None:
+        """Devuelve la imagen existente que coincide con fecha_hora y origen."""
+        result = await self._session.execute(
+            select(ImagenRadar).where(
+                ImagenRadar.fecha_hora == fecha_hora,
+                ImagenRadar.origen == origen,
+            )
+        )
+        return result.scalar_one_or_none()
+
     # Columnas ordenables que viven en imagenes_radar
     _SORT_COLUMNS_DIRECT: dict[str, object] = {
         "id":     ImagenRadar.id,
