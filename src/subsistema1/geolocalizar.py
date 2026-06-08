@@ -1,4 +1,3 @@
-# src/subsistema1/geolocalizar.py
 """
 Fase 6 del pipeline: Geolocalización mediante template matching del eco fijo.
 
@@ -10,6 +9,9 @@ BytesIO que se persiste en la base de datos.
 
 IMPORTANTE: El GeoTIFF de salida tiene 1 banda (uint8) con valores dBZ 
 (0=NoData, 10-80=niveles de precipitación), NO 3 bandas RGB.
+
+INCLUYE: Color Table para que QGIS/ArcGIS muestren los colores del radar
+automáticamente (no en escala de grises).
 """
 from __future__ import annotations
 
@@ -37,15 +39,27 @@ MIN_SHAPE_IOU: float = 0.20
 MIN_GLOBAL_CORR: float = 0.30
 ANCHOS = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
 
-# Filtro DBZ < 35
+# Mapa dBZ -> color RGB (usado para Color Table en el GeoTIFF)
 DBZ_COLOR_MAP = {
-    10: (66, 63, 140),  20: (0, 88, 5),    30: (0, 111, 9),
-    35: (0, 132, 220),  36: (0, 82, 233),   39: (108, 39, 199),
-    42: (210, 30, 133), 45: (200, 102, 135), 48: (219, 136, 52),
-    51: (255, 195, 41), 54: (255, 247, 10),  57: (255, 155, 83),
-    60: (255, 95, 0),   65: (255, 52, 0),    70: (191, 191, 191),
-    80: (212, 212, 212),
+    10: (66, 63, 140),   # Azul oscuro
+    20: (0, 88, 5),      # Verde oscuro
+    30: (0, 111, 9),     # Verde
+    35: (0, 132, 220),   # Cyan
+    36: (0, 82, 233),    # Azul
+    39: (108, 39, 199),  # Violeta
+    42: (210, 30, 133),  # Magenta
+    45: (200, 102, 135), # Rosa
+    48: (219, 136, 52),  # Naranja claro
+    51: (255, 195, 41),  # Amarillo claro
+    54: (255, 247, 10),  # Amarillo
+    57: (255, 155, 83),  # Naranja
+    60: (255, 95, 0),    # Naranja fuerte
+    65: (255, 52, 0),    # Rojo
+    70: (191, 191, 191), # Gris claro
+    80: (212, 212, 212), # Gris muy claro
 }
+
+# Filtro dBZ < 35 (para exportación)
 DBZ_BELOW_35 = {k: v for k, v in DBZ_COLOR_MAP.items() if k < 35}
 DBZ_COLOR_TOLERANCE: float = 18
 
@@ -53,6 +67,23 @@ DBZ_COLOR_TOLERANCE: float = 18
 WATERMARK_GREEN_MIN: int = 50
 WATERMARK_GREEN_MAX: int = 140
 WATERMARK_DOMINANCE: int = 15
+
+
+# ── Color Table para GeoTIFF ─────────────────────────────────────────────────
+
+def _build_color_table() -> dict:
+    """
+    Construye la Color Table para rasterio.
+
+    Cada entrada: valor_dBZ -> (R, G, B, A)
+    NoData=0 -> transparente
+    """
+    color_table = {}
+    for dbz, (r, g, b) in DBZ_COLOR_MAP.items():
+        color_table[dbz] = (r, g, b, 255)  # Alpha=255 (opaco)
+    # NoData transparente
+    color_table[0] = (0, 0, 0, 0)
+    return color_table
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -397,6 +428,7 @@ def dbz_array_to_geotiff_bytes(
     - 1 banda (uint8) con valores dBZ: 0=NoData, 10-80=niveles de precipitación
     - CRS y Transform geoespacial para ubicación exacta
     - Compresión LZW
+    - COLOR TABLE para que QGIS/ArcGIS muestren colores del radar (no escala de grises)
 
     Args:
         dbz_array: Array (H, W) uint8 con valores dBZ (0, 10, 20, ..., 80).
@@ -409,6 +441,7 @@ def dbz_array_to_geotiff_bytes(
         Bytes del GeoTIFF listo para persistir o descargar.
     """
     height, width = dbz_array.shape
+    color_table = _build_color_table()
 
     buffer = io.BytesIO()
     with rasterio.open(
@@ -418,6 +451,8 @@ def dbz_array_to_geotiff_bytes(
         compress=compress, nodata=nodata,
     ) as dst:
         dst.write(dbz_array, 1)
+        # Escribir Color Table (tabla de colores) para que QGIS/ArcGIS muestren colores
+        dst.write_colormap(1, color_table)
         # Escribir metadatos descriptivos
         dst.update_tags(
             DESCRIPTION="Radar DACC Mendoza - Reflectividad dBZ",
@@ -425,6 +460,7 @@ def dbz_array_to_geotiff_bytes(
             LEVELS="10,20,30,35,36,39,42,45,48,51,54,57,60,65,70,80",
             NODATA_VALUE=str(nodata),
             SOURCE="DACC Mendoza - Radar Meteorológico",
+            COLOR_TABLE="Paleta de colores dBZ estándar del radar DACC Mendoza",
         )
 
     buffer.seek(0)
@@ -535,14 +571,15 @@ def geolocalizar(
        - Poner a 0 los píxeles de eco fijo (clutter_mask).
        - Poner a 0 los píxeles con dBZ < 35.
        - Poner a 0 los píxeles con color verde de marca de agua.
-    10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8.
+    10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
+        Y Color Table para que se muestre con colores (no escala de grises).
 
     Args:
         filled_rgb: Array (H, W, 3) uint8. Imagen post-relleno de huecos.
         dbz_map: Array (H, W) int32. Valor dBZ de cada píxel (0 = no tormenta).
 
     Returns:
-        GeoResultado con los bytes del GeoTIFF (1 banda dBZ), metadatos de
+        GeoResultado con los bytes del GeoTIFF (1 banda dBZ + Color Table), metadatos de
         geolocalización, clutter_mask y dbz_array exportado.
 
     Raises:
@@ -681,9 +718,9 @@ def geolocalizar(
     logger.info("dBZ exportado: %d px con datos, %d px NoData",
                 int(np.count_nonzero(export_dbz)), int(np.count_nonzero(export_dbz == 0)))
 
-    # ── 10. GeoTIFF final en memoria (1 banda dBZ uint8) ──────────────────────
+    # ── 10. GeoTIFF final en memoria (1 banda dBZ uint8 + Color Table) ────────
     geotiff_bytes = dbz_array_to_geotiff_bytes(export_dbz, corrected_transform, ref_crs)
-    logger.info("GeoTIFF exportado: %d bytes (1 banda dBZ uint8, NoData=0)", len(geotiff_bytes))
+    logger.info("GeoTIFF exportado: %d bytes (1 banda dBZ uint8 + Color Table, NoData=0)", len(geotiff_bytes))
 
     return GeoResultado(
         geotiff_bytes=geotiff_bytes,
