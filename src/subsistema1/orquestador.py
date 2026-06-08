@@ -17,6 +17,8 @@ Las métricas de calidad se devuelven al llamador para persistencia.
 Lógica de timestamp (local y URL, igual):
 - Con marco DACC → OCR del marco (UTC) y offset UTC-3.
 - Sin marco → nombre del archivo (hora local, sin offset); sin OCR posible.
+
+IMPORTANTE: El GeoTIFF final tiene 1 banda dBZ (uint8), no 3 bandas RGB.
 """
 from __future__ import annotations
 
@@ -298,9 +300,13 @@ async def _ejecutar_fases_comunes(
 ) -> ResultadoPipeline:
     """
     Fases 2-7 comunes a ambas rutas de ingesta.
+
+    IMPORTANTE: Ahora la fase 6 (geolocalización) recibe dbz_map para generar
+    un GeoTIFF con 1 banda dBZ en vez de 3 bandas RGB.
     """
     metricas = MetricasPipeline()
     cropped_png_bytes: bytes | None = None
+    dbz_map: np.ndarray | None = None  # NUEVO: guardar para pasar a geolocalizar
 
     try:
         # ── Fase 2: Detección de marco ────────────────────────────────────────
@@ -337,14 +343,15 @@ async def _ejecutar_fases_comunes(
         await _verificar_cancelacion(request)
 
         # ── Fase 6: Geolocalización ───────────────────────────────────────────
-        # IMPORTANTE: geolocalizar() devuelve clutter_mask (ecos fijos)
-        # que usamos para excluir montañas/terreno del cálculo de dbz_max.
-        geo = await asyncio.to_thread(geolocalizar, filled_rgb)
+        # IMPORTANTE: Ahora pasamos dbz_map para generar GeoTIFF con 1 banda dBZ.
+        # El GeoTIFF final tiene valores uint8: 0=NoData, 10-80=dBZ.
+        geo = await asyncio.to_thread(geolocalizar, filled_rgb, dbz_map)
         metricas.geo = geo
         metricas.score_match = geo.score_match
-        logger.info("[img=%d] Fase 6 — geo ok, score=%.4f, clutter_px=%d",
+        logger.info("[img=%d] Fase 6 — geo ok, score=%.4f, clutter_px=%d, dbz_banda_unica=%s",
                     imagen_id, geo.score_match,
-                    int(np.count_nonzero(geo.clutter_mask)) if geo.clutter_mask is not None else 0)
+                    int(np.count_nonzero(geo.clutter_mask)) if geo.clutter_mask is not None else 0,
+                    geo.dbz_array is not None)
         await paso_repo.registrar(imagen_id, "geolocalizacion")
         await _verificar_cancelacion(request)
 
@@ -380,7 +387,7 @@ async def _ejecutar_fases_comunes(
             error_relleno_pct=metricas.error_relleno_pct,
             dbz_max=metricas.dbz_max,
         )
-        logger.info("[img=%d] Fase 7 — persistido con éxito", imagen_id)
+        logger.info("[img=%d] Fase 7 — persistido con éxito (GeoTIFF 1 banda dBZ)", imagen_id)
 
         return ResultadoPipeline(imagen_id=imagen_id, metricas=metricas, exito=True)
 

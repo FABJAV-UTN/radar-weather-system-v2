@@ -24,6 +24,109 @@ TIMESTAMP_PATTERNS: list[tuple[str, str]] = [
     (r"(\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2})", "%d-%m-%y %H:%M"),
 ]
 
+# Rango válido de años para el radar DACC Mendoza
+_YEAR_MIN_VALID = 2020
+_YEAR_MAX_VALID = 2035
+
+
+def _clamp_year(year: int) -> int:
+    """
+    Corrige años fuera de rango por errores de OCR.
+
+    Tesseract puede confundir dígitos:
+    - 2 ↔ 8, 9, 0, 1, 7
+    - 0 ↔ 8, 9, 6
+    - etc.
+
+    Estrategia: si el año está fuera de [_YEAR_MIN_VALID, _YEAR_MAX_VALID],
+    intenta correcciones dígito por dígito buscando el año válido más cercano.
+    """
+    if _YEAR_MIN_VALID <= year <= _YEAR_MAX_VALID:
+        return year
+
+    year_str = str(year)
+    if len(year_str) != 4:
+        return year  # No podemos corregir si no tiene 4 dígitos
+
+    # Mapeo de confusiones comunes de OCR
+    ocr_confusions = {
+        '0': ['8', '9', '6'],
+        '1': ['7', '4', '9'],
+        '2': ['8', '9', '7', '1'],
+        '3': ['8', '9'],
+        '4': ['1', '9'],
+        '5': ['6', '8', '9'],
+        '6': ['8', '5', '0'],
+        '7': ['1', '2', '9'],
+        '8': ['0', '6', '5', '3', '9'],
+        '9': ['0', '8', '3', '1', '7'],
+    }
+
+    # Intentar correcciones dígito por dígito
+    best_year = year
+    best_distance = abs(year - ((_YEAR_MIN_VALID + _YEAR_MAX_VALID) // 2))
+
+    for i in range(4):
+        original_digit = year_str[i]
+        if original_digit not in ocr_confusions:
+            continue
+        for replacement in ocr_confusions[original_digit]:
+            corrected = year_str[:i] + replacement + year_str[i+1:]
+            try:
+                corrected_year = int(corrected)
+                if _YEAR_MIN_VALID <= corrected_year <= _YEAR_MAX_VALID:
+                    distance = min(
+                        abs(corrected_year - _YEAR_MIN_VALID),
+                        abs(corrected_year - _YEAR_MAX_VALID)
+                    )
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_year = corrected_year
+            except ValueError:
+                continue
+
+    # Si sigue fuera de rango, clamp al rango válido
+    if best_year < _YEAR_MIN_VALID:
+        logger.warning("Año %d corregido a %d (clamp mínimo)", year, _YEAR_MIN_VALID)
+        return _YEAR_MIN_VALID
+    if best_year > _YEAR_MAX_VALID:
+        logger.warning("Año %d corregido a %d (clamp máximo)", year, _YEAR_MAX_VALID)
+        return _YEAR_MAX_VALID
+
+    if best_year != year:
+        logger.info("Año OCR corregido: %d → %d", year, best_year)
+
+    return best_year
+
+
+def _validate_and_fix_datetime(dt: datetime | None) -> datetime | None:
+    """
+    Valida que el datetime tenga componentes razonables y corrige el año si es necesario.
+
+    Returns:
+        datetime corregido o None si es inválido.
+    """
+    if dt is None:
+        return None
+
+    # Validar mes y día
+    if not (1 <= dt.month <= 12) or not (1 <= dt.day <= 31):
+        return None
+
+    # Validar hora
+    if not (0 <= dt.hour <= 23) or not (0 <= dt.minute <= 59) or not (0 <= dt.second <= 59):
+        return None
+
+    # Corregir año si está fuera de rango
+    corrected_year = _clamp_year(dt.year)
+    if corrected_year != dt.year:
+        try:
+            dt = dt.replace(year=corrected_year)
+        except ValueError:
+            return None
+
+    return dt
+
 
 def extract_timestamp(image: Image.Image) -> datetime | None:
     """
@@ -34,6 +137,7 @@ def extract_timestamp(image: Image.Image) -> datetime | None:
     2. Buscar fecha con regex YYYY[/-]MM[/-]DD.
     3. Buscar hora con regex HH:MM:SS.
     4. Construir datetime y aplicar offset UTC-3.
+    5. Validar y corregir año si OCR produjo valor erróneo.
 
     Args:
         image: Imagen PIL (cualquier modo; se convierte a RGB internamente).
@@ -78,6 +182,12 @@ def extract_timestamp(image: Image.Image) -> datetime | None:
         logger.error("Error construyendo datetime: %s", e)
         return None
 
+    # Validar y corregir año
+    dt_utc = _validate_and_fix_datetime(dt_utc)
+    if dt_utc is None:
+        logger.warning("Datetime inválido después de parseo, intentando fallback")
+        return _parse_timestamp_fallback(text)
+
     local_dt = dt_utc + timedelta(hours=settings.radar_timezone_offset_hours)
     logger.info("Timestamp UTC: %s → Local UTC-3: %s", dt_utc, local_dt)
     return local_dt
@@ -89,6 +199,8 @@ def _parse_timestamp_fallback(text: str) -> datetime | None:
 
     Corrige errores comunes de OCR:
     - "9096" → "2026" (confusión 9↔2 en el año).
+    - "8026" → "2026" (confusión 8↔2 en el año).
+    - "2080" → "2026" (confusión 8↔0 y 0↔6 en el año).
     - "+" → ":" (ruido OCR).
     - ";" → ":" (confusión de caracteres).
 
@@ -107,16 +219,18 @@ def _parse_timestamp_fallback(text: str) -> datetime | None:
     if match:
         year_text = match.group(1)
         year = int(year_text)
-        # Corrección OCR: año > 2100 empezando con "9" → reemplazar por "2"
-        if year > 2100 and year_text.startswith("9"):
-            year = int("2" + year_text[1:])
-            logger.debug("Corrección año OCR: %s → %d", year_text, year)
+
+        # Aplicar corrección de año robusta
+        year = _clamp_year(year)
+
         try:
             dt = datetime(
                 year, int(match.group(2)), int(match.group(3)),
                 int(match.group(4)), int(match.group(5)), int(match.group(6)),
             )
-            return dt + timedelta(hours=settings.radar_timezone_offset_hours)
+            dt = _validate_and_fix_datetime(dt)
+            if dt:
+                return dt + timedelta(hours=settings.radar_timezone_offset_hours)
         except ValueError:
             pass
 
@@ -126,7 +240,9 @@ def _parse_timestamp_fallback(text: str) -> datetime | None:
         if m:
             try:
                 dt = datetime.strptime(m.group(1), fmt)
-                return dt + timedelta(hours=settings.radar_timezone_offset_hours)
+                dt = _validate_and_fix_datetime(dt)
+                if dt:
+                    return dt + timedelta(hours=settings.radar_timezone_offset_hours)
             except ValueError:
                 continue
 

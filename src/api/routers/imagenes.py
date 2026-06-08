@@ -6,7 +6,7 @@ Endpoints:
 - GET  /imagenes                              → Lista paginada con sort server-side
 - GET  /imagenes/descargar-lote?desde=&hasta= → ZIP con GeoTIFFs de un rango de fechas
 - GET  /imagenes/{id}                         → Detalle de una imagen
-- GET  /imagenes/{id}/geotiff                 → Descarga del GeoTIFF final
+- GET  /imagenes/{id}/geotiff                 → Descarga del GeoTIFF final (1 banda dBZ)
 """
 from __future__ import annotations
 
@@ -116,6 +116,8 @@ async def descargar_lote(
 
     El ZIP se arma en memoria; cada archivo se llama `radar_<id>_<fecha_hora>.tif`.
     Si no hay imágenes completadas en el rango, devuelve 404.
+
+    Nota: Los GeoTIFFs tienen 1 banda dBZ (uint8), NoData=0.
     """
     repo = ImagenRadarRepository(db)
     imagenes = await repo.listar_por_rango(
@@ -182,7 +184,7 @@ async def obtener_imagen(
     responses={
         200: {
             "content": {"image/tiff": {}},
-            "description": "GeoTIFF corregido listo para descargar.",
+            "description": "GeoTIFF con 1 banda dBZ (uint8). NoData=0. Puede abrirse en QGIS/ArcGIS/rasterio.",
         },
         404: {"description": "Imagen no encontrada o GeoTIFF no disponible."},
     },
@@ -195,8 +197,14 @@ async def descargar_geotiff(
     """
     Descarga el GeoTIFF corregido de una imagen completada.
 
+    El archivo tiene:
+    - **1 banda** con valores dBZ (uint8): 0=NoData, 10-80=niveles de precipitación
+    - CRS y Transform geoespacial para ubicación exacta
+    - Compresión LZW
+
     El archivo se llama `radar_<id>_<fecha_hora>.tif`.
     Puede abrirse directamente en QGIS, ArcGIS o rasterio.
+    Al pasar el mouse sobre un píxel en QGIS, mostrará el valor dBZ.
     """
     repo = ImagenRadarRepository(db)
     imagen = await repo.obtener_por_id(imagen_id)

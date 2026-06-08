@@ -7,7 +7,9 @@ Corrige el Affine Transform de la imagen comparando la posición del eco fijo
 
 Sin I/O directo al pipeline principal: escribe el GeoTIFF final a un buffer
 BytesIO que se persiste en la base de datos.
-#checkpoint
+
+IMPORTANTE: El GeoTIFF de salida tiene 1 banda (uint8) con valores dBZ 
+(0=NoData, 10-80=niveles de precipitación), NO 3 bandas RGB.
 """
 from __future__ import annotations
 
@@ -381,34 +383,96 @@ def correct_transform(
     return Affine(a, b, c + delta_lon, d, e, f + delta_lat)
 
 
-def array_to_geotiff_bytes(
-    arr: np.ndarray,
+def dbz_array_to_geotiff_bytes(
+    dbz_array: np.ndarray,
     transform: Affine,
     crs: object,
     compress: str = COMPRESS,
-    nodata: int | None = 0,
+    nodata: int = 0,
 ) -> bytes:
-    """Convierte un array numpy a bytes de GeoTIFF en memoria (sin escribir a disco)."""
-    if arr.ndim == 3:
-        height, width, count = arr.shape
-        bands = [arr[:, :, i] for i in range(count)]
-    else:
-        height, width = arr.shape
-        count = 1
-        bands = [arr]
+    """
+    Convierte un array dBZ (H, W) uint8 a bytes de GeoTIFF en memoria.
+
+    El GeoTIFF de salida tiene:
+    - 1 banda (uint8) con valores dBZ: 0=NoData, 10-80=niveles de precipitación
+    - CRS y Transform geoespacial para ubicación exacta
+    - Compresión LZW
+
+    Args:
+        dbz_array: Array (H, W) uint8 con valores dBZ (0, 10, 20, ..., 80).
+        transform: Affine Transform del raster.
+        crs: Sistema de coordenadas (ej. EPSG:4326).
+        compress: Algoritmo de compresión.
+        nodata: Valor para píxeles sin datos (default 0).
+
+    Returns:
+        Bytes del GeoTIFF listo para persistir o descargar.
+    """
+    height, width = dbz_array.shape
 
     buffer = io.BytesIO()
     with rasterio.open(
         buffer, "w", driver="GTiff",
-        height=height, width=width, count=count,
-        dtype=arr.dtype, crs=crs, transform=transform,
+        height=height, width=width, count=1,
+        dtype=dbz_array.dtype, crs=crs, transform=transform,
         compress=compress, nodata=nodata,
     ) as dst:
-        for i, band in enumerate(bands, start=1):
-            dst.write(band, i)
+        dst.write(dbz_array, 1)
+        # Escribir metadatos descriptivos
+        dst.update_tags(
+            DESCRIPTION="Radar DACC Mendoza - Reflectividad dBZ",
+            UNIT="dBZ",
+            LEVELS="10,20,30,35,36,39,42,45,48,51,54,57,60,65,70,80",
+            NODATA_VALUE=str(nodata),
+            SOURCE="DACC Mendoza - Radar Meteorológico",
+        )
 
     buffer.seek(0)
     return buffer.read()
+
+
+def _apply_dbz_filters(
+    dbz_map: np.ndarray,
+    filled_rgb: np.ndarray,
+    clutter_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Aplica filtros al mapa dBZ antes de exportar.
+
+    Filtros:
+    1. Eco fijo (clutter_mask): poner a 0 (NoData).
+    2. dBZ < 35: precipitación muy débil / ruido cromático → 0.
+    3. Watermark verde: marca de agua / umbral de precipitación débil → 0.
+
+    Args:
+        dbz_map: Array (H, W) int32 con valores dBZ originales.
+        filled_rgb: Array (H, W, 3) uint8. Imagen RGB post-relleno (para detectar watermark).
+        clutter_mask: Array booleana (H, W). True donde hay ecos fijos.
+
+    Returns:
+        Array (H, W) uint8 con dBZ filtrados (0=NoData, 10-80=valores válidos).
+    """
+    # Convertir a uint8 (los valores 10-80 caben perfectamente)
+    export_dbz = dbz_map.astype(np.uint8).copy()
+
+    # 1. Eco fijo (forma exacta — sin margen rectangular)
+    if clutter_mask is not None and clutter_mask.shape == export_dbz.shape:
+        export_dbz[clutter_mask] = 0
+        logger.info("  Filtro eco_fijo: %d px → 0", int(np.count_nonzero(clutter_mask)))
+
+    # 2. dBZ < 35 (precipitación muy débil / ruido cromático)
+    # En dbz_map, los valores < 35 son: 10, 20, 30
+    below_35_mask = (export_dbz > 0) & (export_dbz < 35)
+    export_dbz[below_35_mask] = 0
+    logger.info("  Filtro dBZ<35: %d px → 0", int(np.count_nonzero(below_35_mask)))
+
+    # 3. Verdes de marca de agua / umbral de precipitación débil
+    # Detectar en el RGB original (más confiable que en dBZ)
+    watermark_mask = build_watermark_mask(filled_rgb)
+    export_dbz[watermark_mask] = 0
+    logger.info("  Filtro watermark: %d px → 0", int(np.count_nonzero(watermark_mask)))
+
+    return export_dbz
 
 
 # ── API pública ───────────────────────────────────────────────────────────────
@@ -424,6 +488,7 @@ class GeoResultado:
         "delta_lon",
         "delta_lat",
         "clutter_mask",
+        "dbz_array",  # NUEVO: array dBZ exportado (1 banda)
     )
 
     def __init__(
@@ -435,6 +500,7 @@ class GeoResultado:
         delta_lon: float,
         delta_lat: float,
         clutter_mask: np.ndarray | None = None,
+        dbz_array: np.ndarray | None = None,
     ) -> None:
         self.geotiff_bytes = geotiff_bytes
         self.transform_affine = transform_affine
@@ -443,16 +509,20 @@ class GeoResultado:
         self.delta_lon = delta_lon
         self.delta_lat = delta_lat
         self.clutter_mask = clutter_mask
+        self.dbz_array = dbz_array  # NUEVO
 
 
-def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
+def geolocalizar(
+    filled_rgb: np.ndarray,
+    dbz_map: np.ndarray,
+) -> GeoResultado:
     """
     Pipeline completo de geolocalización para un array RGB de radar.
 
     Pasos:
     1. Elegir template de georreferencia (tif700 o tif800) según ancho.
     2. Leer CRS y Transform del template.
-    3. Extraer máscara de forma del array.
+    3. Extraer máscara de forma del array RGB (para template matching).
     4. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
     5. Template matching en cascada (masked → classic) con verificación
        de forma (IoU + Corr) por ancho incremental. Se corre para cada
@@ -461,19 +531,19 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
     7. Corregir el Affine Transform.
     8. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
        sin margen rectangular para no eliminar tormenta real adyacente.
-    9. Aplicar filtros al array de salida:
-       - Poner a 0 los píxeles de eco fijo (clutter_mask, forma exacta).
-       - Poner a 0 los píxeles con color de dBZ < 35.
+    9. Aplicar filtros al dbz_map:
+       - Poner a 0 los píxeles de eco fijo (clutter_mask).
+       - Poner a 0 los píxeles con dBZ < 35.
        - Poner a 0 los píxeles con color verde de marca de agua.
-    10. Generar GeoTIFF final en memoria (BytesIO).
+    10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8.
 
     Args:
         filled_rgb: Array (H, W, 3) uint8. Imagen post-relleno de huecos.
+        dbz_map: Array (H, W) int32. Valor dBZ de cada píxel (0 = no tormenta).
 
     Returns:
-        GeoResultado con los bytes del GeoTIFF limpio, metadatos de
-        geolocalización y clutter_mask (máscara booleana H×W de la zona de
-        ecos fijos, útil para excluir del cálculo de dbz_max).
+        GeoResultado con los bytes del GeoTIFF (1 banda dBZ), metadatos de
+        geolocalización, clutter_mask y dbz_array exportado.
 
     Raises:
         FileNotFoundError: Si los templates no están en template_dir.
@@ -597,23 +667,23 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
     logger.info("clutter_mask: %d px de eco fijo enmascarados",
                 int(np.count_nonzero(clutter_mask)))
 
-    # ── 9. Filtros de salida ──────────────────────────────────────────────────
-    export_rgb = filled_rgb.copy()
+    # ── 9. Aplicar filtros al dbz_map y convertir a uint8 ────────────────────
+    export_dbz = _apply_dbz_filters(dbz_map, filled_rgb, clutter_mask)
 
-    # 9a. Eco fijo (forma exacta — sin margen rectangular)
-    export_rgb[clutter_mask] = 0
+    # Verificar que solo tenemos valores válidos
+    unique_values = set(np.unique(export_dbz))
+    valid_values = {0, 10, 20, 30, 35, 36, 39, 42, 45, 48, 51, 54, 57, 60, 65, 70, 80}
+    invalid = unique_values - valid_values
+    if invalid:
+        logger.warning("Valores dBZ inesperados en export: %s", invalid)
 
-    # 9b. dBZ < 35 (precipitación muy débil / ruido cromático)
-    export_rgb[build_dbz_below35_mask(export_rgb)] = 0
+    logger.info("dBZ exportado: valores únicos = %s", sorted(unique_values & valid_values))
+    logger.info("dBZ exportado: %d px con datos, %d px NoData",
+                int(np.count_nonzero(export_dbz)), int(np.count_nonzero(export_dbz == 0)))
 
-    # 9c. Verdes de marca de agua / umbral de precipitación débil
-    export_rgb[build_watermark_mask(export_rgb)] = 0
-
-    logger.info("Filtros aplicados: eco_fijo + dBZ<35 + marca_agua")
-
-    # ── 10. GeoTIFF final en memoria ──────────────────────────────────────────
-    geotiff_bytes = array_to_geotiff_bytes(export_rgb, corrected_transform, ref_crs)
-    logger.info("GeoTIFF exportado (ecos fijos + dbz<35 + watermark → NoData=0)")
+    # ── 10. GeoTIFF final en memoria (1 banda dBZ uint8) ──────────────────────
+    geotiff_bytes = dbz_array_to_geotiff_bytes(export_dbz, corrected_transform, ref_crs)
+    logger.info("GeoTIFF exportado: %d bytes (1 banda dBZ uint8, NoData=0)", len(geotiff_bytes))
 
     return GeoResultado(
         geotiff_bytes=geotiff_bytes,
@@ -623,4 +693,5 @@ def geolocalizar(filled_rgb: np.ndarray) -> GeoResultado:
         delta_lon=delta_lon,
         delta_lat=delta_lat,
         clutter_mask=clutter_mask,
+        dbz_array=export_dbz,  # NUEVO: array dBZ exportado
     )

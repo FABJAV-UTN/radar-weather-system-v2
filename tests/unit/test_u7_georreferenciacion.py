@@ -6,7 +6,8 @@ Testea:
 - match_template_binary(image_mask, template_mask) → template matching TM_CCOEFF_NORMED
 - correct_transform(transform, delta_lon, delta_lat) → corrección del Affine Transform
 - extract_shape_mask(arr)                           → extracción de máscara de forma
-- geolocalizar(filled_rgb)                          → pipeline completo
+- dbz_array_to_geotiff_bytes(dbz_array, ...)         → GeoTIFF 1 banda dBZ
+- geolocalizar(filled_rgb, dbz_map)                  → pipeline completo
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ from src.subsistema1.geolocalizar import (
     get_center_geo,
     match_template_binary,
     pixel_to_geo,
+    dbz_array_to_geotiff_bytes,
 )
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -159,14 +161,77 @@ class TestPixelToGeo:
         assert lat_centro < -32.0  # desplazado hacia abajo
 
 
+class TestDBZArrayToGeoTIFF:
+    """Tests para dbz_array_to_geotiff_bytes (GeoTIFF 1 banda dBZ)."""
+
+    def test_u7_dbz_geotiff_tiene_1_banda(self):
+        """U7: GeoTIFF generado tiene exactamente 1 banda."""
+        dbz_array = np.zeros((100, 100), dtype=np.uint8)
+        dbz_array[40:60, 40:60] = 60  # Simular tormenta
+
+        transform = Affine(0.01, 0, -70.0, 0, -0.01, -32.0)
+        crs = CRS.from_epsg(4326)
+
+        tiff_bytes = dbz_array_to_geotiff_bytes(dbz_array, transform, crs)
+        assert len(tiff_bytes) > 0
+
+        # Verificar con rasterio
+        with rasterio.io.MemoryFile(tiff_bytes) as memfile:
+            with memfile.open() as src:
+                assert src.count == 1, f"Esperaba 1 banda, obtuve {src.count}"
+                assert src.dtype == np.uint8
+                assert src.nodata == 0
+                assert src.crs.to_epsg() == 4326
+        print("[U7] GeoTIFF 1 banda dBZ ✓")
+
+    def test_u7_dbz_geotiff_valores_correctos(self):
+        """U7: Los valores dBZ se preservan en el GeoTIFF."""
+        dbz_array = np.zeros((50, 50), dtype=np.uint8)
+        dbz_array[20:30, 20:30] = 45  # dBZ = 45
+        dbz_array[10:15, 10:15] = 60  # dBZ = 60
+
+        transform = Affine(0.01, 0, -70.0, 0, -0.01, -32.0)
+        crs = CRS.from_epsg(4326)
+
+        tiff_bytes = dbz_array_to_geotiff_bytes(dbz_array, transform, crs)
+
+        with rasterio.io.MemoryFile(tiff_bytes) as memfile:
+            with memfile.open() as src:
+                band = src.read(1)
+                unique = set(np.unique(band))
+                assert 0 in unique
+                assert 45 in unique
+                assert 60 in unique
+        print("[U7] Valores dBZ preservados ✓")
+
+    def test_u7_dbz_geotiff_tags(self):
+        """U7: El GeoTIFF tiene tags descriptivos."""
+        dbz_array = np.zeros((50, 50), dtype=np.uint8)
+
+        transform = Affine(0.01, 0, -70.0, 0, -0.01, -32.0)
+        crs = CRS.from_epsg(4326)
+
+        tiff_bytes = dbz_array_to_geotiff_bytes(dbz_array, transform, crs)
+
+        with rasterio.io.MemoryFile(tiff_bytes) as memfile:
+            with memfile.open() as src:
+                tags = src.tags()
+                assert "DESCRIPTION" in tags
+                assert "UNIT" in tags
+                assert "dBZ" in tags["UNIT"]
+        print("[U7] Tags descriptivos presentes ✓")
+
+
 class TestGeolocalizar:
     """Tests del pipeline completo de geolocalización."""
 
     def test_u7_geolocalizar_con_templates_mock(self):
-        """U7: geolocalizar genera GeoResultado con bytes de GeoTIFF."""
+        """U7: geolocalizar genera GeoResultado con bytes de GeoTIFF 1 banda dBZ."""
         from src.subsistema1.geolocalizar import geolocalizar, GeoResultado
 
         filled_rgb = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
+        dbz_map = np.zeros((200, 200), dtype=np.int32)
+        dbz_map[50:150, 50:150] = 45  # Simular tormenta
 
         # Mock de los templates
         mock_transform = Affine(0.01, 0, -70.0, 0, -0.01, -32.0)
@@ -193,13 +258,18 @@ class TestGeolocalizar:
             patch("src.subsistema1.geolocalizar.rasterio.open",
                   side_effect=[mock_geo_src, mock_eco_src]),
         ):
-            resultado = geolocalizar(filled_rgb)
+            resultado = geolocalizar(filled_rgb, dbz_map)
 
         assert isinstance(resultado, GeoResultado)
         assert len(resultado.geotiff_bytes) > 0
         assert isinstance(resultado.score_match, float)
         assert isinstance(resultado.transform_affine, str)
-        print(f"[U7] GeoTIFF generado — {len(resultado.geotiff_bytes)} bytes, score={resultado.score_match:.4f}")
+        # Verificar que es un GeoTIFF de 1 banda
+        with rasterio.io.MemoryFile(resultado.geotiff_bytes) as memfile:
+            with memfile.open() as src:
+                assert src.count == 1
+                assert src.dtype == np.uint8
+        print(f"[U7] GeoTIFF 1 banda dBZ generado — {len(resultado.geotiff_bytes)} bytes, score={resultado.score_match:.4f}")
 
     def test_u7_geolocalizar_desde_banco_local(self):
         """U7: Pipeline completo con template.png y template_eco_fijo.tif del banco."""
@@ -214,6 +284,9 @@ class TestGeolocalizar:
         from PIL import Image
         img_png = Image.open(FIXTURES_DIR / "template.png").convert("RGB")
         filled_rgb = np.array(img_png)
+        # Crear dbz_map simulado
+        dbz_map = np.zeros(filled_rgb.shape[:2], dtype=np.int32)
+        dbz_map[50:150, 50:150] = 45
 
         with patch("src.subsistema1.geolocalizar.get_template_paths") as mock_paths:
             tif_name = "tif700.tif" if filled_rgb.shape[1] <= 799 else "tif800.tif"
@@ -224,7 +297,11 @@ class TestGeolocalizar:
                 pytest.skip(f"Template {tif_name} no encontrado")
 
             mock_paths.return_value = (tif_path, eco_path)
-            resultado = geolocalizar(filled_rgb)
+            resultado = geolocalizar(filled_rgb, dbz_map)
 
         print(f"[U7] Banco local OK — score={resultado.score_match:.4f}")
         assert resultado.score_match >= 0.0
+        # Verificar que es 1 banda
+        with rasterio.io.MemoryFile(resultado.geotiff_bytes) as memfile:
+            with memfile.open() as src:
+                assert src.count == 1

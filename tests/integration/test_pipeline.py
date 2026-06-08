@@ -6,6 +6,8 @@ con mocks de la DB y los templates geoespaciales.
 
 Estos tests validan que los módulos se integran correctamente entre sí:
 ingestor → detectar_marco → crop → limpiar → rellenar → geolocalizar → orquestador
+
+IMPORTANTE: Los GeoTIFFs de salida tienen 1 banda dBZ (uint8), no 3 bandas RGB.
 """
 from __future__ import annotations
 
@@ -52,6 +54,9 @@ def _gif_bytes(imagen: Image.Image) -> bytes:
 def _mock_geo_resultado():
     """Mock de GeoResultado para evitar depender de rasterio en todos los tests."""
     from src.subsistema1.geolocalizar import GeoResultado
+    # Crear un dbz_array simulado (1 banda)
+    dbz_array = np.zeros((200, 200), dtype=np.uint8)
+    dbz_array[50:150, 50:150] = 45  # Simular tormenta
     return GeoResultado(
         geotiff_bytes=b"FAKE_GEOTIFF_BYTES",
         transform_affine="| 0.01, 0.00, -70.00 || 0.00,-0.01, -32.00 |",
@@ -59,6 +64,7 @@ def _mock_geo_resultado():
         score_match=0.85,
         delta_lon=0.001,
         delta_lat=-0.002,
+        dbz_array=dbz_array,
     )
 
 
@@ -160,6 +166,45 @@ class TestIntegracionLimpiarRellenar:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# INTEGRACIÓN: Geolocalización con 1 banda dBZ
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestIntegracionGeolocalizacionDBZ:
+    """Test de integración de geolocalización con GeoTIFF 1 banda dBZ."""
+
+    def test_geolocalizar_recibe_dbz_map(self):
+        """INT: geolocalizar() requiere dbz_map como segundo argumento."""
+        from src.subsistema1.geolocalizar import geolocalizar
+        import inspect
+
+        sig = inspect.signature(geolocalizar)
+        params = list(sig.parameters.keys())
+        assert "dbz_map" in params, "geolocalizar debe recibir dbz_map"
+        print("[INT] geolocalizar firma correcta: filled_rgb, dbz_map ✓")
+
+    def test_georesultado_tiene_dbz_array(self):
+        """INT: GeoResultado tiene el campo dbz_array."""
+        from src.subsistema1.geolocalizar import GeoResultado
+
+        dbz_array = np.zeros((100, 100), dtype=np.uint8)
+        dbz_array[40:60, 40:60] = 60
+
+        geo = GeoResultado(
+            geotiff_bytes=b"test",
+            transform_affine="test",
+            crs_str="EPSG:4326",
+            score_match=0.9,
+            delta_lon=0.0,
+            delta_lat=0.0,
+            dbz_array=dbz_array,
+        )
+        assert geo.dbz_array is not None
+        assert geo.dbz_array.dtype == np.uint8
+        assert geo.dbz_array.shape == (100, 100)
+        print("[INT] GeoResultado con dbz_array ✓")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # INTEGRACIÓN: Orquestador + Mocks de DB y Geo
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -204,7 +249,10 @@ class TestIntegracionOrquestador:
 
         assert isinstance(resultado, ResultadoPipeline)
         assert resultado.imagen_id == 1
-        print(f"[INT] Pipeline local OK — exito={resultado.exito}, score={resultado.metricas.score_match}")
+        # Verificar que el GeoResultado tiene dbz_array (1 banda dBZ)
+        assert resultado.metricas.geo is not None
+        assert resultado.metricas.geo.dbz_array is not None
+        print(f"[INT] Pipeline local OK — exito={resultado.exito}, score={resultado.metricas.score_match}, dbz_banda_unica=True")
 
     @pytest.mark.asyncio
     async def test_orquestador_pipeline_url_duplicado_rechazado(self):
@@ -310,4 +358,8 @@ class TestIntegracionOrquestador:
         assert isinstance(resultado, ResultadoPipeline)
         assert resultado.imagen_id == 42
         assert resultado.metricas.score_match == 0.85
-        print(f"[INT] Pipeline URL OK — imagen_id={resultado.imagen_id}, exito={resultado.exito}")
+        # Verificar que el GeoTIFF es de 1 banda dBZ
+        assert resultado.metricas.geo is not None
+        assert resultado.metricas.geo.dbz_array is not None
+        assert resultado.metricas.geo.dbz_array.dtype == np.uint8
+        print(f"[INT] Pipeline URL OK — imagen_id={resultado.imagen_id}, exito={resultado.exito}, dbz_1banda=True")
