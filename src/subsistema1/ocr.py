@@ -4,6 +4,34 @@ Extracción de timestamp de imágenes de radar DACC via OCR (Tesseract).
 
 Funciones puras sin I/O de archivos: operan sobre PIL.Image en memoria.
 """
+'''
+explicación completa del codigo de ocr.py:
+El código en ocr.py tiene como objetivo extraer un timestamp de imágenes de radar DACC utilizando OCR (Optical Character Recognition) con la biblioteca Tesseract. 
+El proceso se realiza sin realizar operaciones de entrada/salida de archivos, operando directamente sobre objetos PIL.Image en memoria. 
+Tiene varias funciones que trabajan juntas para lograr este objetivo: 
+1. **_clamp_year(year: int) -> int**:
+   - Corrige años fuera del rango válido (2020-2035) que pueden ser mal interpretados por el OCR.
+   - Utiliza un mapeo de confusiones comunes de OCR para intentar corregir dígito por dígito y encontrar el año más cercano válido.
+   - Si no se puede corregir, se ajusta al límite más cercano del rango válido.
+2. **_validate_and_fix_datetime(dt: datetime | None) -> datetime | None**:
+   - Valida que los componentes del datetime sean razonables (mes, día, hora, minuto, segundo).
+   - Corrige el año si está fuera del rango válido utilizando la función _clamp_year.
+3. **extract_timestamp(image: Image.Image) -> datetime | None**:
+   - Realiza OCR sobre la imagen completa para extraer texto.
+   - Busca patrones de fecha y hora utilizando expresiones regulares.
+   - Construye un objeto datetime a partir de los valores extraídos y aplica un offset de zona horaria (UTC-3 para Mendoza).
+   - Valida y corrige el datetime utilizando la función _validate_and_fix_datetime.
+   - Si falla la extracción principal, intenta un método de fallback más robusto para parsear el timestamp.
+4. **_parse_timestamp_fallback(text: str) -> datetime | None**:
+   - Proporciona un método alternativo para extraer el timestamp en caso de que la extracción principal falle.
+   - Limpia el texto OCR de caracteres no deseados y aplica correcciones comunes de OCR.
+   - Intenta varios patrones de fecha y hora para construir un objeto datetime válido.
+5. **format_filename(location: str, timestamp: datetime) -> str**:
+   - Genera un nombre de archivo normalizado basado en la ubicación y el timestamp extraído, en el formato "lugar_ddmmaa_hhmmss".
+En resumen, el código de ocr.py está diseñado para extraer de manera robusta y confiable un timestamp de imágenes de radar DACC, 
+corrigiendo errores comunes de OCR y asegurando que los valores extraídos sean válidos y consistentes con el rango esperado.  
+
+'''
 from __future__ import annotations
 
 import logging

@@ -411,3 +411,32 @@ async def _ejecutar_fases_comunes(
             exito=False,
             mensaje_error=str(exc),
         )
+    
+'''
+este orquestador primero detecta el marco, luego recorta la imagen si es necesario, limpia la imagen, rellena los huecos, geolocaliza y finalmente persiste los resultados. Además, calcula métricas de calidad y maneja cancelaciones y errores durante el proceso.
+pero detecta marco antes de hacer ocr no? porque si detecta marco y luego hace ocr, 
+si el ocr falla, no recorta la imagen y sigue con el pipeline. entonces el ocr debería ir antes de recortar la imagen, 
+pero efectivamente en este codigo se hace ocr antes de recortar la imagen, 
+ya que el OCR se realiza en la función `_resolver_timestamp`, que se llama antes de ejecutar las fases comunes del pipeline. 
+Esto asegura que si hay un marco presente, se intente extraer el timestamp mediante OCR antes de decidir si se recorta la imagen o no. 
+Si el OCR falla, se utiliza el timestamp del nombre del archivo como respaldo.
+
+en cuanto a si detecta primero el marco antes de hacer OCR, sí, el flujo es: primero se detecta si hay un marco en la imagen (`detectar_marco`), 
+y si hay un marco, se intenta extraer el timestamp mediante OCR (`extract_timestamp`). 
+Si no hay marco o el OCR falla, se recurre al timestamp del nombre del archivo.
+así 
+'''
+'''
+la manera en que orquestador.py controla limpiar.py y rellenar.py es mediante llamadas a funciones asíncronas que ejecutan las fases del pipeline en orden.
+1. Primero, se llama a la función `clean_image` de limpiar.py para limpiar la imagen, eliminando ruido y preparando la imagen para el siguiente paso.
+2. Luego, se llama a la función `fill_gaps` de rellena.py para rellenar los huecos en la imagen limpia, asegurando que la imagen final esté completa y lista para la geolocalización. 
+un algoritmo en pseudocódigo de cómo orquestador.py controla limpiar.py y rellenar.py, detallado, sería:
+FUNCION ejecutar_pipeline(imagen):
+    // Fase 4: Limpieza
+    clean_rgb, gap_mask, dbz_map ← clean_image(imagen)
+    // Fase 5: Relleno
+    filled_rgb ← fill_gaps(clean_rgb, gap_mask)
+    // Continuar con las siguientes fases del pipeline
+FIN FUNCION
+
+'''

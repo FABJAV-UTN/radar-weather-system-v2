@@ -8,6 +8,57 @@ los puntos de corte con offsets fijos definidos en la guia de diseño.
 
 Sin I/O: opera sobre numpy arrays en memoria.
 """
+'''
+por qué este codigo vuelve a buscar los marcos? 
+respuesta: El código vuelve a buscar los marcos porque su objetivo es recortar la imagen eliminando el marco DACC. 
+Para lograr esto, necesita identificar los bordes del marco en la imagen utilizando un color de referencia específico (#5e9d9f) 
+y aplicar ciertos offsets para determinar los puntos exactos de corte.
+El proceso de búsqueda de los marcos se realiza desde los cuatro bordes de la imagen (izquierda, derecha, superior e inferior) 
+para encontrar las apariciones del color de referencia. 
+Una vez que se encuentran las posiciones de los bordes del marco, se aplican los offsets definidos en la guía de diseño para calcular 
+los límites finales del recorte. Esto asegura que el recorte sea preciso y consistente, eliminando el marco sin afectar el contenido principal de la imagen.   
+contra: pero si ya se detectó que hay un marco, ¿no sería más eficiente almacenar las posiciones de los bordes del marco en lugar de buscarlos nuevamente?
+respuesta: Sí, sería más eficiente almacenar las posiciones de los bordes del marco en lugar de buscarlos nuevamente. 
+Si el proceso de detección del marco ya ha identificado las posiciones de los bordes del marco, se podría pasar esa información directamente 
+a la función de recorte, evitando la necesidad de realizar la búsqueda nuevamente. Esto reduciría el tiempo de procesamiento 
+y mejoraría la eficiencia del código.
+Pero por ahora, el código actual realiza la búsqueda de los bordes del marco cada vez que se llama a la función de recorte,
+lo que puede ser redundante si ya se ha detectado previamente la presencia del marco.
+A futuro, se podría optimizar el flujo de trabajo para almacenar y reutilizar las posiciones de los bordes del marco,
+lo que permitiría un recorte más rápido y eficiente sin necesidad de realizar la búsqueda nuevamente.   
+Es decir que detectar_marco.py y crop.py podrían compartir 
+información sobre los bordes del marco, evitando la duplicación de esfuerzos y mejorando el rendimiento general del proceso de recorte.  
+A nivel algoritmo, esto implicaría modificar la función de detección del marco para que devuelva las posiciones de los bordes del marco,
+y luego pasar esa información a la función de recorte en lugar de realizar la búsqueda nuevamente.
+
+por tanto este algoritmo de crop
+FUNCIÓN crop_imagen(imagen, color_referencia, tolerancia):
+arr ← convertir_a_RGB(imagen)
+alto, ancho ← dimensiones(arr)
+fila_central ← alto / 2
+col_central ← ancho / 2
+col_iz ← encontrar_color_en_fila(arr, fila_central, ..., desde_derecha=F, n=1)
+col_de ← encontrar_color_en_fila(arr, fila_central, ..., desde_derecha=V, n=4)
+fil_su ← encontrar_color_en_columna(arr, col_central, ..., desde_abajo=F, n=4)
+fil_in ← encontrar_color_en_columna(arr, col_central, ..., desde_abajo=V, n=2)
+corte_izq ← col_iz + 3
+ // offset calibrado
+corte_der ← col_de - 6
+ // offset calibrado
+corte_sup ← fil_su + 18 // offset calibrado
+corte_inf ← fil_in - 3
+ // offset calibrado
+// Validar y ajustar para no salirse del array
+izq ← max(0, min(corte_izq, ancho-1))
+der ← max(0, min(corte_der, ancho))
+sup ← max(0, min(corte_sup, alto-1))
+inf ← max(0, min(corte_inf, alto))
+RETORNAR arr[sup:inf, izq:der]
+FIN FUNCIÓN
+
+tendria que ser así:
+
+'''
 from __future__ import annotations
 
 import numpy as np

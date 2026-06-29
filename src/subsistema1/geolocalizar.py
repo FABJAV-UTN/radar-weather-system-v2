@@ -13,6 +13,36 @@ IMPORTANTE: El GeoTIFF de salida tiene 1 banda (uint8) con valores dBZ
 INCLUYE: Color Table para que QGIS/ArcGIS muestren los colores del radar
 automáticamente (no en escala de grises).
 """
+'''
+los pasos de geolocalización son:
+1. Elegir template de georreferencia (tif700 o tif800) según ancho. 
+2. Leer CRS y Transform del template.
+3. Extraer máscara de forma del array RGB (para template matching).
+4. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
+5. Template matching en cascada (masked → classic) con verificación
+   de forma (IoU + Corr) por ancho incremental. Se corre para cada
+   template eco y se elige el mejor match.
+6. Calcular delta geográfico entre posición encontrada y real.
+7. Corregir el Affine Transform.
+8. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
+   sin margen rectangular para no eliminar tormenta real adyacente.
+9. Aplicar filtros al dbz_map:
+    - Poner a 0 los píxeles de eco fijo (clutter_mask).
+    - Poner a 0 los píxeles con dBZ < 35.
+    - Poner a 0 los píxeles con color verde de marca de agua.
+10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
+    Y Color Table para que se muestre con colores (no escala de grises).    
+
+basicamente, el pipeline de geolocalización toma la imagen de radar post-relleno (filled_rgb) y el mapa dBZ (dbz_map) como entrada.
+luego realiza una serie de pasos para geolocalizar la imagen y generar un GeoTIFF final con información geoespacial precisa.
+la matemática que usa es principalmente la correlación y la intersección sobre unión (IoU) para verificar la coincidencia entre 
+la imagen de radar y los templates de eco fijo.
+IoU es una métrica que mide la superposición entre dos formas (en este caso, la forma del eco fijo en la imagen y la forma del template).
+
+IoU es la razón entre el área de intersección y el área de unión de dos formas. Se usa para evaluar qué tan bien se alinean las formas en la imagen y el template.
+En el programa se calcula la IoU entre la máscara de la imagen de radar y la máscara del template de eco fijo en la posición encontrada por el template matching.
+en el codigo está usado así: 
+'''
 from __future__ import annotations
 
 import io
@@ -185,6 +215,20 @@ def _extract_region(image_mask: np.ndarray, top_left: tuple,
 
 def verify_iou(image_mask: np.ndarray, template_mask: np.ndarray,
                top_left: tuple) -> tuple[float, bool]:
+    '''
+    esta función calcula la intersección sobre unión (IoU) entre la máscara de la imagen y la máscara del template en la posición top_left.
+    sirve para verificar si la forma del eco fijo en la imagen coincide con la forma del template de eco fijo.
+    explicación de la función:
+    1. extrae la región de la máscara de la imagen correspondiente a la posición del template.
+    2. calcula la intersección y la unión entre la región extraída y la máscara del template, con esta formula: 
+        IoU = (intersección) / (unión), el resultado obtenido es un valor entre 0 y 1, donde 1 indica una coincidencia perfecta y 0 indica que no hay superposición.
+        intersección es la cantidad de píxeles donde ambas máscaras son 255 (blanco), y unión es la cantidad de píxeles donde al menos una de las máscaras es 255.
+        Explicado con manzanas, si la región extraída de la imagen y la máscara del template tienen muchos píxeles blancos en común, 
+        la intersección será grande y la IoU será alta.
+
+    3. devuelve la IoU y un booleano que indica si la IoU es mayor o igual al umbral mínimo (MIN_SHAPE_IOU).
+    
+    '''
     th, tw = template_mask.shape[:2]
     region = _extract_region(image_mask, top_left, th, tw)
     a, b = region == 255, template_mask == 255
@@ -195,6 +239,26 @@ def verify_iou(image_mask: np.ndarray, template_mask: np.ndarray,
 
 def verify_corr(image_mask: np.ndarray, template_mask: np.ndarray,
                 top_left: tuple) -> tuple[float, bool]:
+    '''
+    esta función calcula la correlación entre la región de la máscara de la imagen y la máscara del template en la posición top_left.
+    sirve para verificar si la forma del eco fijo en la imagen coincide con la forma del template de eco fijo.
+    explicación de la función:
+    1. extrae la región de la máscara de la imagen correspondiente a la posición del template.
+    2. calcula la correlación entre la región extraída y la máscara del template usando cv2.matchTemplate con el método TM_CCOEFF_NORMED.
+        si ocurre un error (por ejemplo, si las máscaras son demasiado pequeñas), se calcula la correlación manualmente usando np.corrcoef.
+        el resultado es un valor entre -1 y 1, donde 1 indica una correlación perfecta, 0 indica ninguna correlación y -1 indica una correlación inversa.  
+    3. devuelve la correlación y un booleano que indica si la correlación es mayor o igual al umbral mínimo (MIN_GLOBAL_CORR).
+
+    la diferencia con verify_iou es que la correlación mide la similitud de los patrones de las máscaras, mientras que IoU mide la superposición espacial.
+    son cosas difentes? respuesta: sí, son cosas diferentes. se usan ambas? respuesta: sí, se usan ambas para tener una verificación más robusta de la coincidencia entre la imagen y el template.
+    cada una nos indica algo diferente sobre la relación entre la forma del eco fijo en la imagen y la forma del template de eco fijo.
+    verify_iou nos dice qué tan bien se superponen las formas, mientras que verify_corr nos dice qué tan similares son los patrones de las formas.
+    corr significa correlación, es una medida estadística que indica la relación entre dos variables. en este caso, nos dice qué tan similares son los patrones de las máscaras.
+    IoU significa intersección sobre unión, es una métrica que mide la superposición entre dos formas. en este caso, nos dice qué tan bien se superponen las formas de las máscaras.
+    La formula de corr es:
+    corr = (sum((x - mean(x)) * (y - mean(y))) / (std(x) * std(y) * len(x))) if std(x) > 0 and std(y) > 0 else 0.0  explicación de la formula:
+    
+    '''
     th, tw = template_mask.shape[:2]
     region = _extract_region(image_mask, top_left, th, tw).astype(np.float32)
     tmpl = template_mask.astype(np.float32)
