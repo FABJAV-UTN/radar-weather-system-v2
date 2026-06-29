@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Fase 6 del pipeline: Geolocalización mediante template matching del eco fijo.
 
@@ -43,7 +44,7 @@ IoU es la razón entre el área de intersección y el área de unión de dos for
 En el programa se calcula la IoU entre la máscara de la imagen de radar y la máscara del template de eco fijo en la posición encontrada por el template matching.
 en el codigo está usado así: 
 '''
-from __future__ import annotations
+
 
 import io
 import logging

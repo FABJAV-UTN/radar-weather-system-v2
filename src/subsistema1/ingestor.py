@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # src/subsistema1/ingestor.py
 """
 Fase 1 del pipeline: Adquisición de datos.
@@ -11,7 +13,6 @@ Dos rutas de ingesta:
 Sin persistencia directa: devuelve los bytes crudos y el timestamp al orquestador,
 que decide si hay duplicado antes de crear el registro en base de datos.
 """
-from __future__ import annotations
 
 import io
 import logging

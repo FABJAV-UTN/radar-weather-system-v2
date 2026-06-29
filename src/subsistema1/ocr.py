@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # src/subsistema1/ocr.py
 """
 Extracción de timestamp de imágenes de radar DACC via OCR (Tesseract).
@@ -32,7 +34,6 @@ En resumen, el código de ocr.py está diseñado para extraer de manera robusta 
 corrigiendo errores comunes de OCR y asegurando que los valores extraídos sean válidos y consistentes con el rango esperado.  
 
 '''
-from __future__ import annotations
 
 import logging
 import re

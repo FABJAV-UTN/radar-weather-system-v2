@@ -1,3 +1,4 @@
+from __future__ import annotations
 # src/subsistema1/crop.py
 """
 Fase 3 del pipeline: Recorte condicional (Crop).
@@ -59,7 +60,6 @@ FIN FUNCIÓN
 tendria que ser así:
 
 '''
-from __future__ import annotations
 
 import numpy as np
 from PIL import Image

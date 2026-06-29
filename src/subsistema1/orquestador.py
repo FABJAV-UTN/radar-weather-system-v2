@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # src/subsistema1/orquestador.py
 """
 Orquestador del pipeline de 7 fases del Subsistema 1.
@@ -20,7 +22,6 @@ Lógica de timestamp (local y URL, igual):
 
 IMPORTANTE: El GeoTIFF final tiene 1 banda dBZ (uint8), no 3 bandas RGB.
 """
-from __future__ import annotations
 
 import asyncio
 import io

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # src/subsistema1/rellenar.py
 """
 Fase 5 del pipeline: Relleno de huecos (inpainting).
@@ -8,7 +10,6 @@ Siempre se ejecuta después de la limpieza.
 
 Sin I/O: opera sobre arrays numpy en memoria.
 """
-from __future__ import annotations
 
 import numpy as np
 from scipy import ndimage

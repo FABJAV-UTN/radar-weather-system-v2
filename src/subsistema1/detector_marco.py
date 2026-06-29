@@ -1,3 +1,4 @@
+from __future__ import annotations
 # src/subsistema1/detector_marco.py
 """
 Fase 2 del pipeline: Detección de marco DACC en imágenes de radar.
@@ -8,7 +9,7 @@ Si al menos 3 de 4 bordes detectan el color, la imagen tiene marco.
 
 Sin I/O: opera sobre PIL.Image en memoria.
 """
-from __future__ import annotations
+
 
 import numpy as np
 from PIL import Image

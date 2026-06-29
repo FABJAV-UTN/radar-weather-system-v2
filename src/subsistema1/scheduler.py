@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # src/subsistema1/scheduler.py
 """
 Scheduler de procesamiento continuo desde URL DACC (Ruta B).
@@ -8,7 +10,6 @@ Según la guía de diseño:
   igual espera el intervalo y reintenta.
 - Expone start/stop para control desde la API.
 """
-from __future__ import annotations
 
 import asyncio
 import logging

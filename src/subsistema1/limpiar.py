@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # src/subsistema1/limpiar.py
 """
 Fase 4 del pipeline: Limpieza de píxeles y clasificación dBZ.
@@ -9,7 +11,6 @@ Siempre se ejecuta, independientemente de si hubo crop.
 
 Sin I/O: opera sobre PIL.Image en memoria, devuelve arrays numpy.
 """
-from __future__ import annotations
 
 import numpy as np
 from PIL import Image
