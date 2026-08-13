@@ -17,6 +17,17 @@ from scipy import ndimage
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _detect_thin_gaps(storm_mask: np.ndarray, min_storm_neighbors: int = 5) -> np.ndarray:
+    """Detecta huecos delgados rodeados mayormente por tormenta, aunque no estén cerrados."""
+    if storm_mask.ndim != 2:
+        raise ValueError("storm_mask debe ser de 2 dimensiones")
+
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    kernel[1, 1] = 0
+    neighbor_count = ndimage.convolve(storm_mask.astype(np.uint8), kernel, mode="constant", cval=0)
+    return (~storm_mask) & (neighbor_count >= min_storm_neighbors)
+
+
 def _fill_watermark_region(
     rgb: np.ndarray,
     storm_mask: np.ndarray,
@@ -164,8 +175,10 @@ def fill_gaps(
     result = clean_rgb.copy()
 
     # 1. Rellenar watermark
-    if gap_mask.any():
-        result = _fill_watermark_region(result, storm_mask, gap_mask)
+    line_gaps = _detect_thin_gaps(storm_mask, min_storm_neighbors=5)
+    combined_gap_mask = gap_mask | line_gaps
+    if combined_gap_mask.any():
+        result = _fill_watermark_region(result, storm_mask, combined_gap_mask)
         storm_mask = np.any(result > 0, axis=2)
 
     # 2. Rellenar huecos internos

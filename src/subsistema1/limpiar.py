@@ -74,6 +74,20 @@ def _is_frame_pixel(rgb_flat: np.ndarray) -> np.ndarray:
     return np.any(within_tolerance, axis=1)
 
 
+def _is_competitive_frame_pixel(rgb_flat: np.ndarray) -> np.ndarray:
+    """Marca píxeles de marco solo si son más cercanos al marco que a cualquier dBZ."""
+    frame_diff = rgb_flat[:, np.newaxis, :] - FRAME_COLOR_ARRAY[np.newaxis, :, :]
+    frame_distances = np.linalg.norm(frame_diff, axis=2)
+    within_frame_tolerance = frame_distances <= FRAME_TOLERANCE_ARRAY[np.newaxis, :]
+
+    dbz_diff = rgb_flat[:, np.newaxis, :] - DBZ_COLORS[np.newaxis, :, :]
+    dbz_distances = np.linalg.norm(dbz_diff, axis=2)
+
+    frame_min_distance = np.min(frame_distances, axis=1)
+    dbz_min_distance = np.min(dbz_distances, axis=1)
+    return np.any(within_frame_tolerance, axis=1) & (frame_min_distance < dbz_min_distance)
+
+
 # ── API pública ───────────────────────────────────────────────────────────────
 
 def classify_array(
@@ -136,7 +150,7 @@ def clean_image(
 
     # ── Paso 0: eliminar píxeles de marco ────────────────────────────────────
     flat = rgb.reshape(-1, 3).astype(np.float32)
-    frame_mask = _is_frame_pixel(flat).reshape(h, w)
+    frame_mask = _is_competitive_frame_pixel(flat).reshape(h, w)
     rgb_no_frame = rgb.copy()
     rgb_no_frame[frame_mask] = 0
 

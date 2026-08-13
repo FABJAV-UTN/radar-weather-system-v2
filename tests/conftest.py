@@ -15,6 +15,9 @@ from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-para-tests-minimo-32-chars")
+
 from src.db.models import Base
 from src.main import app
 from src.api.dependencies import get_db

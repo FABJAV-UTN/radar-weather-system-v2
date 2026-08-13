@@ -118,6 +118,21 @@ class TestClassifyArray:
             f"Valores inesperados: {valores_en_resultado - valores_dbz_validos}"
         )
 
+    def test_u6_clean_image_no_borra_pixel_dbz_54(self):
+        """U6: un píxel exacto de 54 dBZ no se borra como marco."""
+        img = np.full((5, 5, 3), 200, dtype=np.uint8)
+        img[2, 2] = (252, 252, 12)
+        img[1, 2] = (252, 252, 12)
+        img[2, 1] = (252, 252, 12)
+        img[2, 3] = (252, 252, 12)
+        img[3, 2] = (252, 252, 12)
+
+        clean_rgb, gap_mask, dbz_map = __import__("src.subsistema1.limpiar", fromlist=["clean_image"]).clean_image(Image.fromarray(img, mode="RGB"))
+
+        assert dbz_map[2, 2] == 54
+        assert np.all(clean_rgb[2, 2] == np.array([252, 252, 12], dtype=np.uint8))
+        assert not gap_mask[2, 2]
+
     def test_u6_pixeles_aleatorios_banco_local(self):
         """U6: Toma 10 píxeles al azar de imagen del banco y los clasifica."""
         path = FIXTURES_DIR / "test_radar.gif"

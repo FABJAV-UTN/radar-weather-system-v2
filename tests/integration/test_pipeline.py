@@ -164,6 +164,31 @@ class TestIntegracionLimpiarRellenar:
         assert pixeles_rellenados <= total_huecos
         print(f"[INT] Métricas: limpios={pixeles_limpios}, rellenados={pixeles_rellenados}, huecos={total_huecos}")
 
+    def test_rellenar_detecta_linea_fina_que_cruza_tormenta(self):
+        """INT: una línea fina que atraviesa la tormenta debe rellenarse con el color de sus vecinos."""
+        from src.subsistema1.rellenar import fill_gaps
+
+        h, w = 9, 9
+        clean_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        fill_color = np.array([200, 15, 134], dtype=np.uint8)
+
+        # Tormenta grande con una línea fina de hueco cruzando el centro.
+        storm_mask = np.zeros((h, w), dtype=bool)
+        storm_mask[2:7, 2:7] = True
+        clean_rgb[storm_mask] = fill_color
+
+        gap_positions = [(4, 3), (4, 4), (4, 5), (4, 6)]
+        for row, col in gap_positions:
+            clean_rgb[row, col] = 0
+
+        gap_mask = np.zeros((h, w), dtype=bool)
+        gap_mask[4, 3:7] = True
+
+        filled = fill_gaps(clean_rgb, gap_mask)
+
+        assert np.all(filled[4, 3:7] == fill_color)
+        assert np.all(filled[4, 3:7] != 0)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # INTEGRACIÓN: Geolocalización con 1 banda dBZ

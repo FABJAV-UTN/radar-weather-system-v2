@@ -12,12 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from src.config import settings
 
 # ── Engine async singleton ────────────────────────────────────────────────────
+engine_kwargs = {"echo": False, "pool_pre_ping": True}
+if not settings.database_url.startswith("sqlite"):
+    engine_kwargs.update({"pool_size": 10, "max_overflow": 20})
+
 engine = create_async_engine(
     settings.database_url,
-    echo=False,            # Poner True solo en desarrollo para ver SQL
-    pool_pre_ping=True,    # Detecta conexiones muertas antes de usarlas
-    pool_size=10,
-    max_overflow=20,
+    **engine_kwargs,
 )
 
 # ── Session factory ───────────────────────────────────────────────────────────
