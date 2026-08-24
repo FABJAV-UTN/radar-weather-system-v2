@@ -29,7 +29,7 @@ los pasos de geolocalización son:
    sin margen rectangular para no eliminar tormenta real adyacente.
 9. Aplicar filtros al dbz_map:
     - Poner a 0 los píxeles de eco fijo (clutter_mask).
-    - Poner a 0 los píxeles con dBZ < 35.
+    - Poner a 0 los píxeles con dBZ < 10.
     - Poner a 0 los píxeles con color verde de marca de agua.
 10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
     Y Color Table para que se muestre con colores (no escala de grises).    
@@ -542,7 +542,7 @@ def _apply_dbz_filters(
 
     Filtros:
     1. Eco fijo (clutter_mask): poner a 0 (NoData).
-    2. dBZ < 35: precipitación muy débil / ruido cromático → 0.
+    2. dBZ < 10: valores fuera de rango de reflectividad válida (10-80 dBZ) → 0.
     3. Watermark verde: marca de agua / umbral de precipitación débil → 0.
 
     Args:
@@ -561,11 +561,10 @@ def _apply_dbz_filters(
         export_dbz[clutter_mask] = 0
         logger.info("  Filtro eco_fijo: %d px → 0", int(np.count_nonzero(clutter_mask)))
 
-    # 2. dBZ < 35 (precipitación muy débil / ruido cromático)
-    # En dbz_map, los valores < 35 son: 10, 20, 30
-    below_35_mask = (export_dbz > 0) & (export_dbz < 35)
-    export_dbz[below_35_mask] = 0
-    logger.info("  Filtro dBZ<35: %d px → 0", int(np.count_nonzero(below_35_mask)))
+    # 2. dBZ < 10 (solo descartar valores menores a 10 dBZ; se preserva escala completa 10 a 80 dBZ)
+    below_10_mask = (export_dbz > 0) & (export_dbz < 10)
+    export_dbz[below_10_mask] = 0
+    logger.info("  Filtro dBZ<10: %d px → 0", int(np.count_nonzero(below_10_mask)))
 
     # 3. Verdes de marca de agua / umbral de precipitación débil
     # Detectar en el RGB original (más confiable que en dBZ)
@@ -634,7 +633,7 @@ def geolocalizar(
        sin margen rectangular para no eliminar tormenta real adyacente.
     9. Aplicar filtros al dbz_map:
        - Poner a 0 los píxeles de eco fijo (clutter_mask).
-       - Poner a 0 los píxeles con dBZ < 35.
+       - Poner a 0 los píxeles con dBZ < 10.
        - Poner a 0 los píxeles con color verde de marca de agua.
     10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
         Y Color Table para que se muestre con colores (no escala de grises).

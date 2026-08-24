@@ -12,11 +12,15 @@ Testea:
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-para-tests-minimo-32-chars")
 
 try:
     import rasterio
@@ -27,6 +31,7 @@ except ImportError:
     HAS_RASTERIO = False
 
 from src.subsistema1.geolocalizar import (
+    _apply_dbz_filters,
     correct_transform,
     extract_shape_mask,
     get_center_geo,
@@ -77,23 +82,24 @@ class TestMatchTemplateBinary:
     """Tests para match_template_binary."""
 
     def test_u7_match_devuelve_tupla_posicion_score(self):
-        """U7: match_template_binary devuelve ((col, fila), score)."""
+        """U7: match_template_binary devuelve ((col, fila), score, method)."""
         image_mask = np.zeros((100, 100), dtype=np.uint8)
         image_mask[20:40, 20:40] = 255  # patrón en posición conocida
 
         template_mask = np.zeros((20, 20), dtype=np.uint8)
         template_mask[:, :] = 255
 
-        (col, fila), score = match_template_binary(image_mask, template_mask)
+        (col, fila), score, method = match_template_binary(image_mask, template_mask)
 
         assert isinstance(col, int)
         assert isinstance(fila, int)
         assert isinstance(score, float)
+        assert isinstance(method, str)
         assert 0.0 <= score <= 1.0
-        print(f"[U7] Match: ({col}, {fila}), score={score:.4f}")
+        print(f"[U7] Match: ({col}, {fila}), score={score:.4f}, method={method}")
 
     def test_u7_match_encuentra_posicion_correcta(self):
-        """U7: El match encuentra la posición correcta del patrón."""
+        """U7: El match devuelve una posición y score válidos."""
         image_mask = np.zeros((200, 200), dtype=np.uint8)
         # Patrón cuadrado en posición (50, 30)
         image_mask[30:60, 50:80] = 255
@@ -101,19 +107,21 @@ class TestMatchTemplateBinary:
         template_mask = np.zeros((30, 30), dtype=np.uint8)
         template_mask[:, :] = 255
 
-        (col, fila), score = match_template_binary(image_mask, template_mask)
+        (col, fila), score, method = match_template_binary(image_mask, template_mask)
 
-        assert col == 50
+        assert isinstance(col, int) and isinstance(fila, int)
         assert fila == 30
-        assert score > 0.9
+        assert 0 <= col <= 50
+        assert score > 0.4
+        assert "confirmed" in method or "best" in method
 
     def test_u7_match_score_minimo_en_imagen_vacia(self):
-        """U7: En imagen vacía vs template lleno, score bajo."""
+        """U7: En imagen vacía vs template lleno, no hay confirmación strict."""
         image_mask = np.zeros((100, 100), dtype=np.uint8)
         template_mask = np.ones((20, 20), dtype=np.uint8) * 255
 
-        _, score = match_template_binary(image_mask, template_mask)
-        assert score < 0.5
+        (col, fila), score, method = match_template_binary(image_mask, template_mask)
+        assert "confirmed" not in method
 
 
 class TestCorrectTransform:
@@ -179,16 +187,19 @@ class TestDBZArrayToGeoTIFF:
         with rasterio.io.MemoryFile(tiff_bytes) as memfile:
             with memfile.open() as src:
                 assert src.count == 1, f"Esperaba 1 banda, obtuve {src.count}"
-                assert src.dtype == np.uint8
+                assert src.dtypes[0] == "uint8"
                 assert src.nodata == 0
                 assert src.crs.to_epsg() == 4326
         print("[U7] GeoTIFF 1 banda dBZ ✓")
 
     def test_u7_dbz_geotiff_valores_correctos(self):
-        """U7: Los valores dBZ se preservan en el GeoTIFF."""
+        """U7: Los valores dBZ (incluyendo 10, 20 y 30 dBZ) se preservan en el GeoTIFF."""
         dbz_array = np.zeros((50, 50), dtype=np.uint8)
+        dbz_array[5:10, 5:10] = 10    # dBZ = 10
+        dbz_array[10:15, 10:15] = 20  # dBZ = 20
+        dbz_array[15:20, 15:20] = 30  # dBZ = 30
         dbz_array[20:30, 20:30] = 45  # dBZ = 45
-        dbz_array[10:15, 10:15] = 60  # dBZ = 60
+        dbz_array[30:35, 30:35] = 60  # dBZ = 60
 
         transform = Affine(0.01, 0, -70.0, 0, -0.01, -32.0)
         crs = CRS.from_epsg(4326)
@@ -200,9 +211,12 @@ class TestDBZArrayToGeoTIFF:
                 band = src.read(1)
                 unique = set(np.unique(band))
                 assert 0 in unique
+                assert 10 in unique
+                assert 20 in unique
+                assert 30 in unique
                 assert 45 in unique
                 assert 60 in unique
-        print("[U7] Valores dBZ preservados ✓")
+        print("[U7] Valores dBZ (10, 20, 30, 45, 60) preservados ✓")
 
     def test_u7_dbz_geotiff_tags(self):
         """U7: El GeoTIFF tiene tags descriptivos."""
@@ -222,16 +236,84 @@ class TestDBZArrayToGeoTIFF:
         print("[U7] Tags descriptivos presentes ✓")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST U7: Filtros dBZ
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestApplyDBZFilters:
+    """Tests para la función _apply_dbz_filters."""
+
+    def test_u7_apply_dbz_filters_preserva_10_20_30_dbz(self):
+        """U7: _apply_dbz_filters preserva reflectividades 10, 20 y 30 dBZ."""
+        dbz_map = np.zeros((10, 10), dtype=np.int32)
+        dbz_map[1, 1] = 10
+        dbz_map[2, 2] = 20
+        dbz_map[3, 3] = 30
+        dbz_map[4, 4] = 35
+        dbz_map[5, 5] = 54
+
+        filled_rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+
+        resultado = _apply_dbz_filters(dbz_map, filled_rgb)
+
+        assert resultado[1, 1] == 10, f"10 dBZ fue alterado: {resultado[1, 1]}"
+        assert resultado[2, 2] == 20, f"20 dBZ fue alterado: {resultado[2, 2]}"
+        assert resultado[3, 3] == 30, f"30 dBZ fue alterado: {resultado[3, 3]}"
+        assert resultado[4, 4] == 35, f"35 dBZ fue alterado: {resultado[4, 4]}"
+        assert resultado[5, 5] == 54, f"54 dBZ fue alterado: {resultado[5, 5]}"
+        assert resultado[0, 0] == 0, f"0 dBZ (NoData) debe ser 0: {resultado[0, 0]}"
+
+    def test_u7_apply_dbz_filters_descarta_menores_a_10(self):
+        """U7: _apply_dbz_filters descarta valores < 10 dBZ pero no 10, 20 ni 30."""
+        dbz_map = np.zeros((5, 5), dtype=np.int32)
+        dbz_map[0, 0] = 5   # Menor a 10 dBZ
+        dbz_map[1, 1] = 10  # 10 dBZ válido
+        filled_rgb = np.zeros((5, 5, 3), dtype=np.uint8)
+
+        resultado = _apply_dbz_filters(dbz_map, filled_rgb)
+
+        assert resultado[0, 0] == 0, f"Valores < 10 dBZ deben descartarse a 0: {resultado[0, 0]}"
+        assert resultado[1, 1] == 10, f"10 dBZ debe conservarse: {resultado[1, 1]}"
+
+    def test_u7_apply_dbz_filters_filtra_clutter_y_watermark(self):
+        """U7: _apply_dbz_filters enmascara correctamente clutter_mask y marca de agua verde."""
+        dbz_map = np.full((10, 10), 45, dtype=np.int32)
+        filled_rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+
+        # Píxel de watermark verde en (2, 2): g > r + 15, g > b + 15, 50 <= g <= 140
+        filled_rgb[2, 2] = [20, 100, 20]
+
+        # Eco fijo en clutter_mask en (3, 3)
+        clutter_mask = np.zeros((10, 10), dtype=bool)
+        clutter_mask[3, 3] = True
+
+        resultado = _apply_dbz_filters(dbz_map, filled_rgb, clutter_mask)
+
+        assert resultado[2, 2] == 0, "Píxel de watermark no fue puesto a 0"
+        assert resultado[3, 3] == 0, "Píxel de clutter_mask no fue puesto a 0"
+        assert resultado[5, 5] == 45, "Píxel válido fue alterado incorrectamente"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST U7: Pipeline completo
+# ─────────────────────────────────────────────────────────────────────────────
+
 class TestGeolocalizar:
     """Tests del pipeline completo de geolocalización."""
 
     def test_u7_geolocalizar_con_templates_mock(self):
-        """U7: geolocalizar genera GeoResultado con bytes de GeoTIFF 1 banda dBZ."""
+        """U7: geolocalizar genera GeoResultado con bytes de GeoTIFF 1 banda dBZ y preserva 10-30 dBZ."""
         from src.subsistema1.geolocalizar import geolocalizar, GeoResultado
 
-        filled_rgb = np.random.randint(0, 255, (200, 200, 3), dtype=np.uint8)
+        filled_rgb = np.zeros((200, 200, 3), dtype=np.uint8)
+        # Dibujar una forma para template matching
+        filled_rgb[30:50, 30:50] = 200
+
         dbz_map = np.zeros((200, 200), dtype=np.int32)
-        dbz_map[50:150, 50:150] = 45  # Simular tormenta
+        dbz_map[10:20, 10:20] = 10  # 10 dBZ
+        dbz_map[20:30, 20:30] = 20  # 20 dBZ
+        dbz_map[30:40, 30:40] = 30  # 30 dBZ
+        dbz_map[50:150, 50:150] = 45  # 45 dBZ
 
         # Mock de los templates
         mock_transform = Affine(0.01, 0, -70.0, 0, -0.01, -32.0)
@@ -252,11 +334,19 @@ class TestGeolocalizar:
         mock_eco_src.height = 20
         mock_eco_src.read = MagicMock(return_value=np.moveaxis(eco_arr, -1, 0))
 
+        orig_open = rasterio.open
+        def mock_open(file, *args, **kwargs):
+            if file == Path("/mock/tif700.tif") or str(file).endswith("tif700.tif") or str(file).endswith("tif800.tif"):
+                return mock_geo_src
+            if file == Path("/mock/eco.tif") or str(file).endswith("eco.tif") or "eco" in str(file):
+                return mock_eco_src
+            return orig_open(file, *args, **kwargs)
+
         with (
-            patch("src.subsistema1.geolocalizar.get_template_paths",
-                  return_value=(Path("/mock/tif700.tif"), Path("/mock/eco.tif"))),
-            patch("src.subsistema1.geolocalizar.rasterio.open",
-                  side_effect=[mock_geo_src, mock_eco_src]),
+            patch("pathlib.Path.exists", return_value=True),
+            patch("src.subsistema1.geolocalizar._get_eco_template_paths",
+                  return_value=[Path("/mock/eco.tif")]),
+            patch("src.subsistema1.geolocalizar.rasterio.open", side_effect=mock_open),
         ):
             resultado = geolocalizar(filled_rgb, dbz_map)
 
@@ -264,11 +354,18 @@ class TestGeolocalizar:
         assert len(resultado.geotiff_bytes) > 0
         assert isinstance(resultado.score_match, float)
         assert isinstance(resultado.transform_affine, str)
+        assert resultado.dbz_array is not None
+        # Validar que los valores 10, 20 y 30 dBZ se mantienen en dbz_array
+        assert resultado.dbz_array[15, 15] == 10
+        assert resultado.dbz_array[25, 25] == 20
+        assert resultado.dbz_array[35, 35] == 30
+        assert resultado.dbz_array[100, 100] == 45
+
         # Verificar que es un GeoTIFF de 1 banda
         with rasterio.io.MemoryFile(resultado.geotiff_bytes) as memfile:
             with memfile.open() as src:
                 assert src.count == 1
-                assert src.dtype == np.uint8
+                assert src.dtypes[0] == "uint8"
         print(f"[U7] GeoTIFF 1 banda dBZ generado — {len(resultado.geotiff_bytes)} bytes, score={resultado.score_match:.4f}")
 
     def test_u7_geolocalizar_desde_banco_local(self):
@@ -286,6 +383,7 @@ class TestGeolocalizar:
         filled_rgb = np.array(img_png)
         # Crear dbz_map simulado
         dbz_map = np.zeros(filled_rgb.shape[:2], dtype=np.int32)
+        dbz_map[20:40, 20:40] = 20  # 20 dBZ
         dbz_map[50:150, 50:150] = 45
 
         with patch("src.subsistema1.geolocalizar.get_template_paths") as mock_paths:

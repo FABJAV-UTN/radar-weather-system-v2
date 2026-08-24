@@ -5,9 +5,10 @@ from __future__ import annotations
 Fase 4 del pipeline: Limpieza de píxeles y clasificación dBZ.
 
 Siempre se ejecuta, independientemente de si hubo crop.
-- Elimina colores del marco/borde (#5f9ea0, #fffd01).
+- Elimina colores del marco/borde (#5f9ea0).
 - Clasifica cada píxel al valor dBZ más cercano por distancia euclídea RGB.
-- Detecta la región de watermark (esquina sup-izq) y genera máscara de huecos.
+- Recupera directamente los colores alterados de la marca de agua.
+- Detecta los residuos no recuperables y genera máscara de huecos.
 
 Sin I/O: opera sobre PIL.Image en memoria, devuelve arrays numpy.
 """
@@ -19,10 +20,29 @@ from PIL import Image
 WATERMARK_REGION: dict[str, int] = {"x": 0, "y": 0, "w": 120, "h": 30}
 DEFAULT_COLOR_THRESHOLD: float = 30.0
 
+WATERMARK_TO_DBZ: dict[tuple[int, int, int], int] = {
+    (109, 80, 144): 10,
+    (37, 109, 5): 20,
+    (37, 131, 5): 30,
+    (45, 146, 224): 35,
+    (65, 90, 237): 36,
+    (147, 32, 203): 39,
+    (237, 34, 139): 42,
+    (229, 119, 140): 45,
+    (247, 155, 64): 48,
+    (255, 215, 54): 51,
+    (255, 255, 17): 54,
+    (255, 173, 93): 57,
+    (255, 114, 10): 60,
+    (255, 71, 33): 65,
+    (227, 209, 195): 70,
+    (248, 230, 216): 80,
+}
+WATERMARK_TOLERANCE: float = 40.0
+
 # Colores del marco/borde a eliminar (pueden aparecer como residuos del crop)
 FRAME_COLORS: list[tuple[tuple[int, int, int], float]] = [
-    ((95, 158, 160), 20.0),   # #5f9ea0 — cadet blue (marco)
-    ((255, 253, 1), 25.0),    # #fffd01 — amarillo brillante (marco)
+    ((95, 158, 160), 20.0),   # #5f9ea0 — cadet blue (marco DACC)
 ]
 
 # Mapa dBZ → color RGB. 16 niveles de 10 a 80 dBZ.
@@ -43,6 +63,11 @@ DBZ_COLOR_MAP: dict[int, tuple[int, int, int]] = {
     65: (253, 52, 28),
     70: (190, 190, 190),
     80: (211, 211, 211),
+}
+
+WATERMARK_RGB_MAP: dict[tuple[int, int, int], tuple[int, int, int]] = {
+    watermark_color: DBZ_COLOR_MAP[dbz]
+    for watermark_color, dbz in WATERMARK_TO_DBZ.items()
 }
 
 # Arrays precomputados para vectorizar la clasificación
@@ -127,9 +152,9 @@ def clean_image(
     Limpia una imagen de radar eliminando el marco y clasificando píxeles dBZ.
 
     Pasos:
-    1. Eliminar colores del marco/borde (cadet blue y amarillo).
+    1. Eliminar colores del marco/borde (cadet blue).
     2. Clasificar píxeles por distancia euclídea al mapa dBZ.
-    3. Detectar región de watermark y generar máscara de huecos.
+    3. Recuperar colores conocidos de la marca de agua y detectar residuos.
     4. Construir imagen limpia con solo los píxeles de tormenta.
 
     Args:
@@ -139,7 +164,7 @@ def clean_image(
     Returns:
         Tupla (clean_rgb, gap_mask, dbz_map):
         - clean_rgb: Array (H, W, 3) uint8. Solo píxeles de tormenta; resto en negro.
-        - gap_mask: Array booleano (H, W). True en píxeles a rellenar (watermark).
+        - gap_mask: Array booleano (H, W). True en huecos espaciales o residuos.
         - dbz_map: Array (H, W) int32. Valor dBZ de cada píxel (0 = no tormenta).
     """
     if getattr(image, "is_animated", False):
@@ -154,17 +179,30 @@ def clean_image(
     rgb_no_frame = rgb.copy()
     rgb_no_frame[frame_mask] = 0
 
-    # ── Paso 1: clasificar por dBZ ───────────────────────────────────────────
-    dbz_map = classify_array(rgb_no_frame, color_threshold)
-    storm_mask = dbz_map > 0
+    # ── Paso 1: restaurar colores de la marca de agua ───────────────────────
+    # La restauración debe ocurrir antes de clasificar el array a dBZ.
+    rgb_float = rgb_no_frame.astype(np.float32)
+    for color_wm, color_orig in WATERMARK_RGB_MAP.items():
+        color_wm_array = np.asarray(color_wm, dtype=np.float32)
+        dist = np.sqrt(np.sum((rgb_float - color_wm_array) ** 2, axis=-1))
+        matches = dist < WATERMARK_TOLERANCE
+        if np.any(matches):
+            rgb_no_frame[matches] = color_orig
 
-    # ── Paso 2: detectar watermark y generar máscara de huecos ──────────────
+    # ── Paso 2: clasificar por dBZ ──────────────────────────────────────────
+    dbz_map = classify_array(rgb_no_frame, color_threshold)
+
+    # ── Paso 3: detectar residuos y generar máscara de huecos ───────────────
+    storm_mask = dbz_map > 0
     wm = WATERMARK_REGION
+    y_start, x_start = wm["y"], wm["x"]
+    y_end = min(y_start + wm["h"], h)
+    x_end = min(x_start + wm["w"], w)
     watermark_mask = np.zeros((h, w), dtype=bool)
-    watermark_mask[wm["y"]:wm["y"] + wm["h"], wm["x"]:wm["x"] + wm["w"]] = True
+    watermark_mask[y_start:y_end, x_start:x_end] = True
     gap_mask = watermark_mask & ~storm_mask
 
-    # ── Paso 3: imagen limpia ─────────────────────────────────────────────────
+    # ── Paso 4: imagen limpia ────────────────────────────────────────────────
     clean_rgb = np.zeros_like(rgb)
     clean_rgb[storm_mask] = rgb_no_frame[storm_mask]
 

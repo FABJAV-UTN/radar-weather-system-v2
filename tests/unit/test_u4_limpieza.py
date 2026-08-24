@@ -20,6 +20,8 @@ from PIL import Image
 from src.subsistema1.limpiar import (
     FRAME_COLORS,
     WATERMARK_REGION,
+    WATERMARK_RGB_MAP,
+    WATERMARK_TO_DBZ,
     clean_image,
     classify_array,
     DBZ_COLOR_MAP,
@@ -108,8 +110,8 @@ class TestLimpiezaU4:
         assert WATERMARK_REGION["h"] == 30
 
     def test_u4_frame_colors_definidos(self):
-        """U4: FRAME_COLORS contiene cadet blue y amarillo con sus tolerancias."""
-        assert len(FRAME_COLORS) >= 2
+        """U4: FRAME_COLORS contiene únicamente cadet blue con su tolerancia."""
+        assert len(FRAME_COLORS) == 1
         colores = [c[0] for c in FRAME_COLORS]
         # Cadet blue: ~(95, 158, 160)
         assert any(c[0] in range(85, 110) for c in colores)
@@ -124,9 +126,57 @@ class TestLimpiezaU4:
     def test_u4_is_frame_pixel_no_detecta_dbz(self):
         """U4: _is_frame_pixel no detecta colores dBZ como marco."""
         # Rojo intenso (color dBZ de tormenta fuerte)
-        pixel_dbz = np.array([[255, 52, 0]], dtype=np.float32)
-        resultado = _is_frame_pixel(pixel_dbz)
-        assert not resultado[0]
+        pixel_rojo = np.array([[255, 52, 0]], dtype=np.float32)
+        assert not _is_frame_pixel(pixel_rojo)[0]
+
+        # Amarillo brillante (color dBZ 54)
+        pixel_amarillo_fffd01 = np.array([[255, 253, 1]], dtype=np.float32)
+        assert not _is_frame_pixel(pixel_amarillo_fffd01)[0]
+
+        pixel_amarillo_54dbz = np.array([[252, 252, 12]], dtype=np.float32)
+        assert not _is_frame_pixel(pixel_amarillo_54dbz)[0]
+
+    def test_u4_limpieza_clasifica_amarillos_como_54dbz(self):
+        """U4: clean_image clasifica variaciones amarillas como 54 dBZ."""
+        arr = np.zeros((10, 10, 3), dtype=np.uint8)
+
+        # Píxel amarillo #fffd01 en (2, 2)
+        arr[2, 2] = [255, 253, 1]
+
+        # Píxel de tormenta de 54 dBZ en (5, 5) con RGB exacto [252, 252, 12]
+        arr[5, 5] = [252, 252, 12]
+
+        imagen = Image.fromarray(arr, mode="RGB")
+        clean_rgb, gap_mask, dbz_map = clean_image(imagen)
+
+        # Dentro de la región watermark se normaliza a la paleta original.
+        assert np.array_equal(clean_rgb[2, 2], [252, 252, 12]), (
+            f"El amarillo en (2,2) no se normalizó. RGB obtenido: {clean_rgb[2, 2]}"
+        )
+        assert dbz_map[2, 2] == 54, (
+            f"El amarillo [255, 253, 1] en (2,2) debe clasificarse como 54 dBZ. dBZ obtenido: {dbz_map[2, 2]}"
+        )
+
+        # Valida que el píxel de tormenta en (5, 5) se mantenga con su valor RGB y que dbz_map conserve 54
+        assert np.array_equal(clean_rgb[5, 5], [252, 252, 12]), (
+            f"El píxel de tormenta en (5,5) no conservó su RGB. RGB obtenido: {clean_rgb[5, 5]}"
+        )
+        assert dbz_map[5, 5] == 54, (
+            f"El píxel de tormenta en (5,5) no tiene dBZ=54. dBZ obtenido: {dbz_map[5, 5]}"
+        )
+
+    def test_u4_limpieza_clasifica_color_de_marca_de_agua(self):
+        """U4: una variación comprimida de watermark se recupera como dBZ y RGB original."""
+        arr = np.zeros((40, 140, 3), dtype=np.uint8)
+        arr[5, 5] = [255, 250, 20]
+
+        clean_rgb, gap_mask, dbz_map = clean_image(Image.fromarray(arr, mode="RGB"))
+
+        assert WATERMARK_TO_DBZ[(255, 255, 17)] == 54
+        assert WATERMARK_RGB_MAP[(255, 255, 17)] == (252, 252, 12)
+        assert dbz_map[5, 5] == 54
+        assert not gap_mask[5, 5]
+        assert np.array_equal(clean_rgb[5, 5], [252, 252, 12])
 
     def test_u4_desde_banco_local(self):
         """U4: Limpieza completa usando test_radar.png y test_radar.gif del banco."""

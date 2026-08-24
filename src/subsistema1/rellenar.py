@@ -2,10 +2,10 @@ from __future__ import annotations
 
 # src/subsistema1/rellenar.py
 """
-Fase 5 del pipeline: Relleno de huecos (inpainting).
+Fase 5 del pipeline: Relleno espacial de huecos (inpainting).
 
 Siempre se ejecuta después de la limpieza.
-- Inpainting del watermark: votación por mayoría de vecinos válidos.
+- Relleno de líneas divisorias, textos y residuos sin reflectividad recuperable.
 - Relleno de huecos internos: scipy binary_fill_holes + mediana del borde.
 
 Sin I/O: opera sobre arrays numpy en memoria.
@@ -35,7 +35,7 @@ def _fill_watermark_region(
     max_passes: int = 10,
 ) -> np.ndarray:
     """
-    Rellena la región del watermark por votación de mayoría de vecinos.
+    Rellena huecos espaciales por votación de mayoría de vecinos.
 
     Para cada píxel del hueco, examina los 4 vecinos cardinales.
     Si al menos 2 tienen datos válidos, asigna el color más frecuente.
@@ -44,11 +44,11 @@ def _fill_watermark_region(
     Args:
         rgb: Array (H, W, 3) uint8. Imagen limpia.
         storm_mask: Máscara booleana de píxeles con datos.
-        gap_mask: Máscara booleana de píxeles a rellenar (watermark).
+        gap_mask: Máscara booleana de huecos o residuos a rellenar.
         max_passes: Límite de iteraciones para evitar bucles infinitos.
 
     Returns:
-        Array (H, W, 3) uint8 con el watermark rellenado.
+        Array (H, W, 3) uint8 con los huecos rellenados.
     """
     result = rgb.copy()
     current_storm = storm_mask.copy()
@@ -159,12 +159,12 @@ def fill_gaps(
     Rellena todos los huecos de la imagen limpia de radar.
 
     Orden de operaciones:
-    1. Inpainting del watermark (región fija de la esquina sup-izq).
+    1. Inpainting espacial de líneas, textos y residuos indicados por las máscaras.
     2. Relleno de huecos internos dentro de la tormenta (opcional).
 
     Args:
         clean_rgb: Array (H, W, 3) uint8. Imagen post-limpieza.
-        gap_mask: Máscara booleana (H, W). True en píxeles del watermark a rellenar.
+        gap_mask: Máscara booleana (H, W). True en huecos o residuos a rellenar.
         fill_general_holes: Si True, también rellena huecos internos de la tormenta.
         min_hole_size: Tamaño mínimo (píxeles) para rellenar un hueco interno.
 
@@ -174,7 +174,7 @@ def fill_gaps(
     storm_mask = np.any(clean_rgb > 0, axis=2)
     result = clean_rgb.copy()
 
-    # 1. Rellenar watermark
+    # 1. Rellenar huecos espaciales y residuos
     line_gaps = _detect_thin_gaps(storm_mask, min_storm_neighbors=5)
     combined_gap_mask = gap_mask | line_gaps
     if combined_gap_mask.any():
