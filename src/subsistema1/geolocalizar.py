@@ -68,6 +68,7 @@ COMPRESS: str = "lzw"
 MIN_MATCH_SCORE_GLOBAL: float = 0.50
 MIN_SHAPE_IOU: float = 0.20
 MIN_GLOBAL_CORR: float = 0.30
+MIN_SHAPE_IOU: float = 0.30
 ANCHOS = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 1.00]
 
 # Mapa dBZ -> color RGB (usado para Color Table en el GeoTIFF)
@@ -292,13 +293,39 @@ def _compute_result_maps(image_f: np.ndarray, template_f: np.ndarray,
     return maps
 
 
+def _candidate_top_peaks(result_map: np.ndarray, max_candidates: int = 5,
+                        min_score: float = MIN_MATCH_SCORE) -> list[tuple[int, int, float]]:
+    """Devuelve los picos locales más fuertes dentro del mapa, ordenados por score."""
+    safe = result_map.copy().astype(np.float32)
+    safe[~np.isfinite(safe)] = -1.0
+    h, w = safe.shape
+    candidates: list[tuple[int, int, float]] = []
+    remaining = safe.copy()
+
+    for _ in range(max_candidates):
+        if not np.any(remaining >= min_score):
+            break
+        idx = int(np.argmax(remaining))
+        row, col = divmod(idx, w)
+        score = float(remaining[row, col])
+        if score < min_score:
+            break
+        candidates.append((row, col, score))
+        r0 = max(0, row - 2)
+        r1 = min(h, row + 3)
+        c0 = max(0, col - 2)
+        c1 = min(w, col + 3)
+        remaining[r0:r1, c0:c1] = -np.inf
+
+    return candidates
+
+
 def _scan_zone(result_map: np.ndarray, image_mask: np.ndarray,
                template_mask: np.ndarray, zone_width: float,
                label: str, strict: bool = True):
     """
-    Escanea izquierda→derecha hasta zone_width.
-    strict=True: exige IoU+Corr válidos.
-    strict=False: devuelve el mejor score sin verificar forma.
+    Escanea la zona solicitada usando los Top-5 picos locales y selecciona
+    el candidato con mejor IoU × correlación, en lugar de aceptar el máximo absoluto.
     """
     safe = result_map.copy()
     safe[~np.isfinite(safe)] = -1.0
@@ -307,30 +334,66 @@ def _scan_zone(result_map: np.ndarray, image_mask: np.ndarray,
     n_cols = safe.shape[1]
     max_col = max(1, int(n_cols * zone_width))
     min_overlap = max(int(th * tw * 0.05), 10)
+    zone = safe[:, :max_col]
 
-    if not strict:
-        zone = safe[:, :max_col]
-        idx = int(np.argmax(zone))
-        row, col = idx // zone.shape[1], idx % zone.shape[1]
-        score = float(zone[row, col])
-        return ((col, row), score, f"{label}_raw") if score >= 0 else None
-
-    for col in range(max_col):
-        best_row = int(np.argmax(safe[:, col]))
-        score = float(safe[best_row, col])
-        if score < MIN_MATCH_SCORE:
-            continue
-        r1 = min(best_row + th, ih)
+    candidates: list[dict] = []
+    for row, col, score in _candidate_top_peaks(zone, max_candidates=5, min_score=MIN_MATCH_SCORE):
+        r1 = min(row + th, ih)
         c1 = min(col + tw, iw)
-        if np.count_nonzero(image_mask[best_row:r1, col:c1]) < min_overlap:
+        if np.count_nonzero(image_mask[row:r1, col:c1]) < min_overlap:
             continue
-        top_left = (col, best_row)
-        iou, iou_ok = verify_iou(image_mask, template_mask, top_left)
-        corr, corr_ok = verify_corr(image_mask, template_mask, top_left)
-        if iou_ok and corr_ok:
-            logger.info("    [%s z=%.2f] score=%.4f @ (%d,%d)", label, zone_width, score, col, best_row)
-            return top_left, score, f"{label}_z{int(zone_width*100)}"
-    return None
+        top_left = (col, row)
+        iou, _ = verify_iou(image_mask, template_mask, top_left)
+        corr, _ = verify_corr(image_mask, template_mask, top_left)
+        combo = float(iou) * float(corr)
+        if not np.isfinite(combo):
+            continue
+        candidates.append({
+            "top_left": top_left,
+            "score": float(score),
+            "iou": float(iou),
+            "corr": float(corr),
+            "combo": combo,
+        })
+
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda c: (c["combo"], c["iou"], c["corr"], c["score"]))
+    if strict and best["iou"] < MIN_SHAPE_IOU:
+        logger.info(
+            "    [%s z=%.2f] sin candidato válido: mejor IoU=%.4f < %.2f",
+            label, zone_width, best["iou"], MIN_SHAPE_IOU,
+        )
+        return None
+
+    top_left = best["top_left"]
+    score = best["score"]
+    if strict:
+        logger.info(
+            "    [%s z=%.2f] best_combo=%.4f @ (%d,%d) iou=%.4f corr=%.4f",
+            label,
+            zone_width,
+            best["combo"],
+            top_left[0],
+            top_left[1],
+            best["iou"],
+            best["corr"],
+        )
+        return top_left, score, f"{label}_combo_z{int(zone_width * 100)}"
+
+    logger.info(
+        "    [%s z=%.2f] best_raw_combo=%.4f @ (%d,%d) iou=%.4f corr=%.4f",
+        label,
+        zone_width,
+        best["combo"],
+        top_left[0],
+        top_left[1],
+        best["iou"],
+        best["corr"],
+    )
+    method_name = f"{label}_raw_combo" if best["iou"] >= MIN_SHAPE_IOU else f"{label}_raw_fallback"
+    return top_left, score, method_name
 
 
 def _find_match_for_width(image_mask: np.ndarray, template_mask: np.ndarray,
@@ -556,10 +619,14 @@ def _apply_dbz_filters(
     # Convertir a uint8 (los valores 10-80 caben perfectamente)
     export_dbz = dbz_map.astype(np.uint8).copy()
 
-    # 1. Eco fijo (forma exacta — sin margen rectangular)
+    # 1. Eco fijo (forma exacta — sin margen rectangular).
+    # Conservamos 10–30 dBZ en el export para no borrar ecos débiles que son
+    # válidos, pero eliminamos el eco fijo fuerte cuando corresponde.
     if clutter_mask is not None and clutter_mask.shape == export_dbz.shape:
-        export_dbz[clutter_mask] = 0
-        logger.info("  Filtro eco_fijo: %d px → 0", int(np.count_nonzero(clutter_mask)))
+        clutter_strong = clutter_mask & (export_dbz >= 35)
+        export_dbz[clutter_strong] = 0
+        logger.info("  Filtro eco_fijo (>=35 dBZ): %d px → 0",
+                    int(np.count_nonzero(clutter_strong)))
 
     # 2. dBZ < 10 (solo descartar valores menores a 10 dBZ; se preserva escala completa 10 a 80 dBZ)
     below_10_mask = (export_dbz > 0) & (export_dbz < 10)

@@ -1,0 +1,6 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        ".venv/bin/python": true,
+        "pytest": true
+    }
+}
