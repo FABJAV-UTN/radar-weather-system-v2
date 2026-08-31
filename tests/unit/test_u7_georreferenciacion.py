@@ -38,6 +38,7 @@ from src.subsistema1.geolocalizar import (
     match_template_binary,
     pixel_to_geo,
     dbz_array_to_geotiff_bytes,
+    refine_subpixel_peak,
 )
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -122,6 +123,34 @@ class TestMatchTemplateBinary:
 
         (col, fila), score, method = match_template_binary(image_mask, template_mask)
         assert "confirmed" not in method
+
+
+class TestRefineSubpixelPeak:
+    """Tests para refinamiento subpíxel."""
+
+    def test_u7_refine_subpixel_pico_simetrico_no_cambia(self):
+        """U7: Si los vecinos son simétricos, el pico se mantiene en el entero exacto."""
+        # Pico en (row=1, col=1) con vecinos simétricos
+        rmap = np.array([
+            [0.5, 0.8, 0.5],
+            [0.8, 1.0, 0.8],
+            [0.5, 0.8, 0.5],
+        ], dtype=np.float32)
+        sub_c, sub_r = refine_subpixel_peak(rmap, col=1, row=1)
+        assert abs(sub_c - 1.0) < 1e-6
+        assert abs(sub_r - 1.0) < 1e-6
+
+    def test_u7_refine_subpixel_sesgo_derecha(self):
+        """U7: Si el vecino derecho es mayor que el izquierdo, el pico se desplaza a la derecha."""
+        rmap = np.array([
+            [0.4, 0.7, 0.5],
+            [0.6, 1.0, 0.9],  # derecha (0.9) > izquierda (0.6)
+            [0.4, 0.7, 0.5],
+        ], dtype=np.float32)
+        sub_c, sub_r = refine_subpixel_peak(rmap, col=1, row=1)
+        assert sub_c > 1.0  # desplazado a la derecha
+        assert sub_c < 1.5
+        assert abs(sub_r - 1.0) < 1e-6
 
 
 class TestCorrectTransform:
@@ -330,14 +359,13 @@ class TestGeolocalizar:
         mock_eco_src.__enter__ = MagicMock(return_value=mock_eco_src)
         mock_eco_src.__exit__ = MagicMock(return_value=False)
         mock_eco_src.transform = mock_transform
+        mock_eco_src.crs = mock_crs
         mock_eco_src.width = 20
         mock_eco_src.height = 20
         mock_eco_src.read = MagicMock(return_value=np.moveaxis(eco_arr, -1, 0))
 
         orig_open = rasterio.open
         def mock_open(file, *args, **kwargs):
-            if file == Path("/mock/tif700.tif") or str(file).endswith("tif700.tif") or str(file).endswith("tif800.tif"):
-                return mock_geo_src
             if file == Path("/mock/eco.tif") or str(file).endswith("eco.tif") or "eco" in str(file):
                 return mock_eco_src
             return orig_open(file, *args, **kwargs)
@@ -386,15 +414,8 @@ class TestGeolocalizar:
         dbz_map[20:40, 20:40] = 20  # 20 dBZ
         dbz_map[50:150, 50:150] = 45
 
-        with patch("src.subsistema1.geolocalizar.get_template_paths") as mock_paths:
-            tif_name = "tif700.tif" if filled_rgb.shape[1] <= 799 else "tif800.tif"
-            tif_path = FIXTURES_DIR.parent / "templates" / tif_name
-            eco_path = FIXTURES_DIR / "template_eco_fijo.tif"
-
-            if not tif_path.exists():
-                pytest.skip(f"Template {tif_name} no encontrado")
-
-            mock_paths.return_value = (tif_path, eco_path)
+        eco_path = FIXTURES_DIR / "template_eco_fijo.tif"
+        with patch("src.subsistema1.geolocalizar._get_eco_template_paths", return_value=[eco_path]):
             resultado = geolocalizar(filled_rgb, dbz_map)
 
         print(f"[U7] Banco local OK — score={resultado.score_match:.4f}")
@@ -403,3 +424,51 @@ class TestGeolocalizar:
         with rasterio.io.MemoryFile(resultado.geotiff_bytes) as memfile:
             with memfile.open() as src:
                 assert src.count == 1
+
+    def test_u7_geolocalizar_calculo_directo_affine(self):
+        """U7: Verifica que el origen del Affine Transform se calcula directamente desde el eco."""
+        from src.subsistema1.geolocalizar import geolocalizar
+
+        # Imagen 100x100 con eco centrado en (col 40, row 30)
+        filled_rgb = np.zeros((100, 100, 3), dtype=np.uint8)
+        filled_rgb[30:50, 40:60] = 200
+        dbz_map = np.zeros((100, 100), dtype=np.int32)
+        dbz_map[30:50, 40:60] = 45
+
+        mock_transform = Affine(0.01, 0.0, -68.80, 0.0, -0.01, -32.90)
+        mock_crs = CRS.from_epsg(4326)
+
+        eco_arr = np.ones((20, 20, 3), dtype=np.uint8) * 200
+        mock_eco_src = MagicMock()
+        mock_eco_src.__enter__ = MagicMock(return_value=mock_eco_src)
+        mock_eco_src.__exit__ = MagicMock(return_value=False)
+        mock_eco_src.transform = mock_transform
+        mock_eco_src.crs = mock_crs
+        mock_eco_src.width = 20
+        mock_eco_src.height = 20
+        mock_eco_src.read = MagicMock(return_value=np.moveaxis(eco_arr, -1, 0))
+
+        orig_open = rasterio.open
+        def mock_open(file, *args, **kwargs):
+            if file == Path("/mock/eco.tif") or "eco" in str(file):
+                return mock_eco_src
+            return orig_open(file, *args, **kwargs)
+
+        with (
+            patch("src.subsistema1.geolocalizar._get_eco_template_paths", return_value=[Path("/mock/eco.tif")]),
+            patch("src.subsistema1.geolocalizar.rasterio.open", side_effect=mock_open),
+        ):
+            resultado = geolocalizar(filled_rgb, dbz_map)
+
+        with rasterio.io.MemoryFile(resultado.geotiff_bytes) as memfile:
+            with memfile.open() as src:
+                # El centro del eco está en pixel (9.5, 9.5) del template:
+                # true_x = -68.80 + 9.5 * 0.01 = -68.705
+                # true_y = -32.90 + 9.5 * (-0.01) = -32.995
+                # El match cayó en (col 40, row 30), centro en imagen = (49.5, 39.5)
+                # origin_x = -68.705 - (49.5 * 0.01) = -68.705 - 0.495 = -69.20
+                # origin_y = -32.995 - (39.5 * -0.01) = -32.995 + 0.395 = -32.60
+                assert abs(src.transform.c - (-69.20)) < 1e-6
+                assert abs(src.transform.f - (-32.60)) < 1e-6
+                assert abs(src.transform.a - 0.01) < 1e-6
+                assert abs(src.transform.e - (-0.01)) < 1e-6

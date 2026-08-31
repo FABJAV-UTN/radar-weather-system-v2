@@ -16,33 +16,26 @@ automáticamente (no en escala de grises).
 """
 '''
 los pasos de geolocalización son:
-1. Elegir template de georreferencia (tif700 o tif800) según ancho. 
-2. Leer CRS y Transform del template.
-3. Extraer máscara de forma del array RGB (para template matching).
-4. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
-5. Template matching en cascada (masked → classic) con verificación
+1. Extraer máscara de forma del array RGB (para template matching).
+2. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
+3. Template matching en cascada (masked → classic) con verificación
    de forma (IoU + Corr) por ancho incremental. Se corre para cada
    template eco y se elige el mejor match.
-6. Calcular delta geográfico entre posición encontrada y real.
-7. Corregir el Affine Transform.
-8. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
+4. Calcular la georreferenciación completa directamente proyectando la
+   posición real del eco (Ground Truth) y su tamaño de píxel hacia el origen (0,0).
+5. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
    sin margen rectangular para no eliminar tormenta real adyacente.
-9. Aplicar filtros al dbz_map:
+6. Aplicar filtros al dbz_map:
     - Poner a 0 los píxeles de eco fijo (clutter_mask).
     - Poner a 0 los píxeles con dBZ < 10.
     - Poner a 0 los píxeles con color verde de marca de agua.
-10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
-    Y Color Table para que se muestre con colores (no escala de grises).    
+7. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
+    y Color Table para que se muestre con colores (no escala de grises).    
 
-basicamente, el pipeline de geolocalización toma la imagen de radar post-relleno (filled_rgb) y el mapa dBZ (dbz_map) como entrada.
+básicamente, el pipeline de geolocalización toma la imagen de radar post-relleno (filled_rgb) y el mapa dBZ (dbz_map) como entrada.
 luego realiza una serie de pasos para geolocalizar la imagen y generar un GeoTIFF final con información geoespacial precisa.
 la matemática que usa es principalmente la correlación y la intersección sobre unión (IoU) para verificar la coincidencia entre 
 la imagen de radar y los templates de eco fijo.
-IoU es una métrica que mide la superposición entre dos formas (en este caso, la forma del eco fijo en la imagen y la forma del template).
-
-IoU es la razón entre el área de intersección y el área de unión de dos formas. Se usa para evaluar qué tan bien se alinean las formas en la imagen y el template.
-En el programa se calcula la IoU entre la máscara de la imagen de radar y la máscara del template de eco fijo en la posición encontrada por el template matching.
-en el codigo está usado así: 
 '''
 
 
@@ -120,20 +113,19 @@ def _build_color_table() -> dict:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def get_template_paths(width: int) -> tuple[Path, Path]:
+def get_template_paths(width: int | None = None) -> tuple[Path | None, Path]:
     """
-    Devuelve (template_geo, template_eco_fijo_principal) según el ancho.
-    El segundo valor es solo el primer eco template; para obtener todos
-    los templates eco usa get_eco_template_paths().
+    Mantenido por retrocompatibilidad. Devuelve (template_geo_opcional, template_eco_fijo_principal).
+    La geolocalización actual se basa exclusivamente en los templates de eco fijo.
     """
     template_dir = Path(settings.template_dir)
-    geo_name = "tif800.tif" if width > THRESHOLD_WIDTH else "tif700.tif"
-    geo_path = template_dir / geo_name
-
-    if not geo_path.exists():
-        raise FileNotFoundError(f"Template de georreferencia no encontrado: {geo_path}")
-
-    return geo_path, _get_eco_template_paths(template_dir)[0]
+    eco_paths = _get_eco_template_paths(template_dir)
+    geo_path = None
+    if width is not None:
+        candidate = template_dir / ("tif800.tif" if width > THRESHOLD_WIDTH else "tif700.tif")
+        if candidate.exists():
+            geo_path = candidate
+    return geo_path, eco_paths[0]
 
 
 def _get_eco_template_paths(template_dir: Path | None = None) -> list[Path]:
@@ -542,6 +534,53 @@ def correct_transform(
     return Affine(a, b, c + delta_lon, d, e, f + delta_lat)
 
 
+def refine_subpixel_peak(
+    result_map: np.ndarray,
+    col: int,
+    row: int,
+) -> tuple[float, float]:
+    """
+    Refina la posición discreta (col, row) del pico a precisión subpíxel (decimal)
+    mediante interpolación parabólica cuadrática continua en el vecindario 3x3.
+
+    Fórmula:
+        delta_x = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma)
+        donde beta = R(0), alpha = R(-1), gamma = R(+1)
+
+    Devuelve (col_subpixel, row_subpixel).
+    """
+    h, w = result_map.shape
+    r = int(round(row))
+    c = int(round(col))
+
+    delta_c = 0.0
+    delta_r = 0.0
+
+    # Subpíxel horizontal (columnas / X)
+    if 0 < c < w - 1 and 0 <= r < h:
+        alpha = float(result_map[r, c - 1])
+        beta  = float(result_map[r, c])
+        gamma = float(result_map[r, c + 1])
+        denom = alpha - 2.0 * beta + gamma
+        if denom < -1e-7:  # Parábola con máximo (cóncava hacia abajo)
+            delta = 0.5 * (alpha - gamma) / denom
+            if -1.0 <= delta <= 1.0:
+                delta_c = delta
+
+    # Subpíxel vertical (filas / Y)
+    if 0 < r < h - 1 and 0 <= c < w:
+        alpha = float(result_map[r - 1, c])
+        beta  = float(result_map[r, c])
+        gamma = float(result_map[r + 1, c])
+        denom = alpha - 2.0 * beta + gamma
+        if denom < -1e-7:
+            delta = 0.5 * (alpha - gamma) / denom
+            if -1.0 <= delta <= 1.0:
+                delta_r = delta
+
+    return float(col) + delta_c, float(row) + delta_r
+
+
 def dbz_array_to_geotiff_bytes(
     dbz_array: np.ndarray,
     transform: Affine,
@@ -687,23 +726,22 @@ def geolocalizar(
     Pipeline completo de geolocalización para un array RGB de radar.
 
     Pasos:
-    1. Elegir template de georreferencia (tif700 o tif800) según ancho.
-    2. Leer CRS y Transform del template.
-    3. Extraer máscara de forma del array RGB (para template matching).
-    4. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
-    5. Template matching en cascada (masked → classic) con verificación
+    1. Extraer máscara de forma del array RGB (para template matching).
+    2. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
+    3. Template matching en cascada (masked → classic) con verificación
        de forma (IoU + Corr) por ancho incremental. Se corre para cada
        template eco y se elige el mejor match.
-    6. Calcular delta geográfico entre posición encontrada y real.
-    7. Corregir el Affine Transform.
-    8. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
+    4. Calcular georreferenciación completa (Affine Transform) directamente
+       a partir de la posición real del eco fijo (Ground Truth), su tamaño
+       de píxel y su ubicación detectada en la imagen.
+    5. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
        sin margen rectangular para no eliminar tormenta real adyacente.
-    9. Aplicar filtros al dbz_map:
+    6. Aplicar filtros al dbz_map:
        - Poner a 0 los píxeles de eco fijo (clutter_mask).
        - Poner a 0 los píxeles con dBZ < 10.
        - Poner a 0 los píxeles con color verde de marca de agua.
-    10. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
-        Y Color Table para que se muestre con colores (no escala de grises).
+    7. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
+       y Color Table para que se muestre con colores (no escala de grises).
 
     Args:
         filled_rgb: Array (H, W, 3) uint8. Imagen post-relleno de huecos.
@@ -714,30 +752,17 @@ def geolocalizar(
         geolocalización, clutter_mask y dbz_array exportado.
 
     Raises:
-        FileNotFoundError: Si los templates no están en template_dir.
+        FileNotFoundError: Si no se encuentran templates eco en template_dir.
         ValueError: Si todos los templates eco son más grandes que la imagen.
         RuntimeError: Si todos los métodos de template matching fallan.
     """
     height, width = filled_rgb.shape[:2]
     template_dir = Path(settings.template_dir)
 
-    # ── 1. Template de georreferencia ─────────────────────────────────────────
-    geo_name = "tif800.tif" if width > THRESHOLD_WIDTH else "tif700.tif"
-    geo_path = template_dir / geo_name
-    if not geo_path.exists():
-        raise FileNotFoundError(f"Template de georreferencia no encontrado: {geo_path}")
-    logger.info("Template geo: %s", geo_path.name)
-
-    # ── 2. CRS y Transform de referencia ─────────────────────────────────────
-    with rasterio.open(geo_path) as src_geo:
-        ref_transform = src_geo.transform
-        ref_crs = src_geo.crs
-    logger.info("CRS: %s | Transform: %s", ref_crs, ref_transform)
-
-    # ── 3. Máscara de forma del array de entrada ──────────────────────────────
+    # ── 1. Máscara de forma del array de entrada ──────────────────────────────
     png_mask = extract_shape_mask(filled_rgb)
 
-    # ── 4. Cargar todos los templates eco ────────────────────────────────────
+    # ── 2. Cargar todos los templates eco ────────────────────────────────────
     eco_paths = _get_eco_template_paths(template_dir)
     logger.info("Templates eco: %s", [p.name for p in eco_paths])
 
@@ -746,6 +771,7 @@ def geolocalizar(
         with rasterio.open(eco_path) as src_eco:
             eco_arr       = np.moveaxis(src_eco.read(), 0, -1)  # (C,H,W)→(H,W,C)
             eco_transform = src_eco.transform
+            eco_crs       = src_eco.crs
             eco_w         = src_eco.width
             eco_h_px      = src_eco.height
         eco_mask = extract_shape_mask(eco_arr)
@@ -757,6 +783,7 @@ def geolocalizar(
             "template":      eco_path.name,
             "eco_mask":      eco_mask,
             "eco_transform": eco_transform,
+            "eco_crs":       eco_crs,
             "eco_w":         eco_w,
             "eco_h":         eco_h_px,
         })
@@ -765,7 +792,7 @@ def geolocalizar(
     if not eco_data:
         raise ValueError("Ningún template eco es compatible con esta imagen (todos más grandes).")
 
-    # ── 5. Template matching para cada template eco ───────────────────────────
+    # ── 3. Template matching para cada template eco ───────────────────────────
     match_results = []
     for eco in eco_data:
         top_left, score, method = match_template_binary(png_mask, eco["eco_mask"])
@@ -779,6 +806,7 @@ def geolocalizar(
             "method":        method,
             "eco_mask":      eco["eco_mask"],
             "eco_transform": eco["eco_transform"],
+            "eco_crs":       eco["eco_crs"],
             "eco_w":         eco["eco_w"],
             "eco_h":         eco["eco_h"],
             "png_mask":      png_mask,
@@ -788,11 +816,11 @@ def geolocalizar(
     best       = _best_eco_match(png_mask, match_results)
     match_col  = best["col"]
     match_row  = best["row"]
-    top_left   = (match_col, match_row)
     score      = best["score"]
     method     = best["method"]
     eco_mask   = best["eco_mask"]
     eco_transform = best["eco_transform"]
+    ref_crs    = best["eco_crs"]
     eco_w      = best["eco_w"]
     eco_h      = best["eco_h"]
 
@@ -803,39 +831,53 @@ def geolocalizar(
         logger.warning("Score bajo (%.4f < %.4f). Match puede ser incorrecto.",
                        score, MIN_MATCH_SCORE)
 
-    unreliable = "unreliable" in method or method == "fallback"
+    # ── 4. Refinamiento subpíxel y cálculo directo de la georreferenciación ───
+    pixel_size_x = eco_transform.a
+    pixel_size_y = eco_transform.e
 
-    # ── 6. Delta geográfico ───────────────────────────────────────────────────
-    if unreliable:
-        logger.warning("Fallback no confiable. Sin corrección geográfica.")
-        corrected_transform = ref_transform
-        delta_lon = 0.0
-        delta_lat = 0.0
-    else:
-        eco_center_col = match_col + (eco_w - 1) / 2.0
-        eco_center_row = match_row + (eco_h - 1) / 2.0
-        found_lon, found_lat = pixel_to_geo(ref_transform, eco_center_col, eco_center_row)
-        true_lon, true_lat   = get_center_geo(eco_transform, eco_w, eco_h)
-        delta_lon = true_lon - found_lon
-        delta_lat = true_lat - found_lat
-        logger.info("Δlon=%.6f, Δlat=%.6f", delta_lon, delta_lat)
+    # Refinar (match_col, match_row) con precisión decimal (subpíxel)
+    image_f = png_mask.astype(np.float32)
+    template_f = eco_mask.astype(np.float32)
+    try:
+        res_map = cv2.matchTemplate(image_f, template_f, cv2.TM_CCOEFF_NORMED)
+        sub_col, sub_row = refine_subpixel_peak(res_map, match_col, match_row)
+    except Exception:
+        sub_col, sub_row = float(match_col), float(match_row)
 
-        # ── 7. Corregir Transform ─────────────────────────────────────────────
-        corrected_transform = correct_transform(ref_transform, delta_lon, delta_lat)
+    logger.info("Posición entera: (%d,%d) -> Subpíxel: (%.3f, %.3f)",
+                match_col, match_row, sub_col, sub_row)
 
-    # ── 8. Máscara de clutter por forma exacta del eco ───────────────────────
+    # Centro geográfico del eco en el template (Ground Truth real)
+    true_lon, true_lat = get_center_geo(eco_transform, eco_w, eco_h)
+
+    # Centro en píxeles del eco dentro de la imagen completa (con precisión decimal)
+    eco_center_col = sub_col + (eco_w - 1) / 2.0
+    eco_center_row = sub_row + (eco_h - 1) / 2.0
+
+    # Proyección directa hacia la esquina superior izquierda (origen 0,0)
+    origin_lon = true_lon - (eco_center_col * pixel_size_x)
+    origin_lat = true_lat - (eco_center_row * pixel_size_y)
+
+    corrected_transform = Affine(pixel_size_x, 0.0, origin_lon, 0.0, pixel_size_y, origin_lat)
+    delta_lon = 0.0
+    delta_lat = 0.0
+    logger.info("Transform calculado (subpíxel): %s | CRS: %s", corrected_transform, ref_crs)
+
+    # ── 5. Máscara de clutter por forma exacta del eco ───────────────────────
     # Se usa la forma exacta del template (eco_mask > 0), NO un rectángulo
     # con margen, para no eliminar precipitación real que pase sobre el eco.
     clutter_mask = np.zeros((height, width), dtype=bool)
-    row_end = min(match_row + eco_h, height)
-    col_end = min(match_col + eco_w, width)
-    clutter_mask[match_row:row_end, match_col:col_end] = (
-        eco_mask[:row_end - match_row, :col_end - match_col] > 0
+    match_row_int = int(round(match_row))
+    match_col_int = int(round(match_col))
+    row_end = min(match_row_int + eco_h, height)
+    col_end = min(match_col_int + eco_w, width)
+    clutter_mask[match_row_int:row_end, match_col_int:col_end] = (
+        eco_mask[:row_end - match_row_int, :col_end - match_col_int] > 0
     )
     logger.info("clutter_mask: %d px de eco fijo enmascarados",
                 int(np.count_nonzero(clutter_mask)))
 
-    # ── 9. Aplicar filtros al dbz_map y convertir a uint8 ────────────────────
+    # ── 6. Aplicar filtros al dbz_map y convertir a uint8 ────────────────────
     export_dbz = _apply_dbz_filters(dbz_map, filled_rgb, clutter_mask)
 
     # Verificar que solo tenemos valores válidos
@@ -849,7 +891,7 @@ def geolocalizar(
     logger.info("dBZ exportado: %d px con datos, %d px NoData",
                 int(np.count_nonzero(export_dbz)), int(np.count_nonzero(export_dbz == 0)))
 
-    # ── 10. GeoTIFF final en memoria (1 banda dBZ uint8 + Color Table) ────────
+    # ── 7. GeoTIFF final en memoria (1 banda dBZ uint8 + Color Table) ────────
     geotiff_bytes = dbz_array_to_geotiff_bytes(export_dbz, corrected_transform, ref_crs)
     logger.info("GeoTIFF exportado: %d bytes (1 banda dBZ uint8 + Color Table, NoData=0)", len(geotiff_bytes))
 
@@ -861,5 +903,5 @@ def geolocalizar(
         delta_lon=delta_lon,
         delta_lat=delta_lat,
         clutter_mask=clutter_mask,
-        dbz_array=export_dbz,  # NUEVO: array dBZ exportado
+        dbz_array=export_dbz,
     )
