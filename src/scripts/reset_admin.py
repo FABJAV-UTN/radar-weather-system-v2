@@ -17,8 +17,8 @@ Uso (dentro del contenedor backend):
         uv run --no-dev python -m src.scripts.reset_admin \\
         --username admin --password "miClaveSegura" --email admin@admin.com
 
-Si no se pasa --password se genera una aleatoria de 12 caracteres y se
-imprime una sola vez al finalizar.
+Sin argumentos deja admin / admin (uso de laboratorio). Con --aleatoria
+genera una contraseña de 12 caracteres y la imprime una sola vez.
 """
 from __future__ import annotations
 
@@ -85,16 +85,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--password",
-        default=None,
-        help="Contraseña nueva (min 8 caracteres). Si se omite, se genera una aleatoria.",
+        default="admin",
+        help="Contraseña nueva (default: admin). Con --aleatoria se genera una.",
+    )
+    parser.add_argument(
+        "--aleatoria", action="store_true", help="Generar una contraseña aleatoria de 12 caracteres."
     )
     args = parser.parse_args()
 
-    password = args.password or _generar_password()
+    password = _generar_password() if args.aleatoria else args.password
     if len(password) < MIN_PASSWORD_LEN:
-        parser.error(
-            f"La contraseña debe tener al menos {MIN_PASSWORD_LEN} caracteres."
-        )
+        print(f"⚠ Contraseña de menos de {MIN_PASSWORD_LEN} caracteres: solo para uso en el laboratorio.")
 
     creado = asyncio.run(reset_admin(args.username, password, args.email))
 
@@ -102,7 +103,8 @@ def main() -> None:
     print(f"✓ Usuario admin '{args.username}' {accion}.")
     print(f"  usuario:     {args.username}")
     print(f"  contraseña:  {password}")
-    print("  (guardala: no se vuelve a mostrar)")
+    if args.aleatoria:
+        print("  (guardala: no se vuelve a mostrar)")
 
 
 if __name__ == "__main__":

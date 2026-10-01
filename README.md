@@ -84,15 +84,17 @@ Para correr en segundo plano:
 docker compose up --build -d
 ```
 
-### 4. Correr las migraciones de base de datos
+### 4. Migraciones y usuario (automático)
 
-La primera vez (o cuando haya migraciones nuevas), ejecutar desde la raíz del proyecto:
+Al arrancar, el backend aplica solo las migraciones pendientes (`alembic upgrade head`) y,
+si no existe, crea el usuario de laboratorio **admin / admin**. Si después le cambiás la
+contraseña, no se pisa. En producción se desactiva con `SEED_ADMIN=false`.
+
+Para volver a dejar el admin en admin / admin:
 
 ```bash
-docker compose exec backend uv run alembic upgrade head
+docker compose exec backend uv run --no-dev python -m src.scripts.reset_admin
 ```
-
-Esto crea el esquema `radar` y todas las tablas en PostgreSQL.
 
 ---
 
@@ -120,7 +122,7 @@ El frontend de técnicos está disponible en:
 
 **http://localhost:3000**
 
-Iniciá sesión con un usuario registrado en la base de datos. Los roles disponibles son `admin`, `operador` y `visualizador`.
+Iniciá sesión con **admin / admin** (se crea solo al arrancar) o con otro usuario registrado. Los roles disponibles son `admin`, `operador` y `visualizador`.
 
 > El frontend corre con hot reload en modo desarrollo. Los cambios en `frontend_tecnicos/src/` se reflejan automáticamente sin reiniciar el contenedor.
 

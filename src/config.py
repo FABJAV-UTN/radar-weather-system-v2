@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # ── CORS ─────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000,http://localhost:3001"
 
+    # ── Usuario de laboratorio ───────────────────────────────────────────────
+    # Si no existe el usuario 'admin', se crea al arrancar con contraseña 'admin'.
+    # Pensado para las PCs del laboratorio. En producción: SEED_ADMIN=false.
+    seed_admin: bool = True
+    seed_admin_username: str = "admin"
+    seed_admin_password: str = "admin"
+
     # ── Servidor ─────────────────────────────────────────────────────────────
     host: str = "0.0.0.0"
     port: int = 8000

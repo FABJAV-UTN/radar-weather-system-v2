@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ── Base de datos ──────────────────────────────────────────────────────
   db:
@@ -55,18 +53,13 @@ services:
       start_period: 40s
     networks:
       - radar-net
+    # Aplica las migraciones pendientes y después levanta la API.
+    # Si la base ya está al día, "alembic upgrade head" no hace nada.
     command:
       [
-        "uv",
-        "run",
-        "--no-dev",
-        "uvicorn",
-        "src.main:app",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000",
-        "--reload",
+        "sh",
+        "-c",
+        "uv run --no-dev alembic upgrade head && uv run --no-dev uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload",
       ]
 
   # ── Frontend React (DESARROLLO con hot reload) ──────────────────────────

@@ -232,7 +232,7 @@ Hay dos carpetas de scripts a propósito:
 
 Scripts actuales:
 
-- `src/scripts/reset_admin.py`: resetea o crea el usuario admin.
+- `src/scripts/reset_admin.py`: deja el usuario admin en admin / admin (o `--password X`, o `--aleatoria`). El backend además crea admin / admin al arrancar si no existe (`SEED_ADMIN=false` lo desactiva).
 - `src/scripts/limpiar_duplicados.py`: borra imágenes con el mismo contenido (MD5 de `raw_data`) y deja la primera de cada grupo. Sin `--aplicar` solo muestra lo que borraría.
 - `src/scripts/demo_tracking.py`: carga 3 tracks SINTÉTICOS (ejecución `demo`) para ver la página de Tracking; `--borrar` los elimina.
 - `scripts/f0_inventario.py`: inventario de eventos, huecos y deriva de georreferenciación (F0 del Subsistema 2). Deja CSV en `salidas_f0/`.

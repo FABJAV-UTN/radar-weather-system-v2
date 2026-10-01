@@ -74,4 +74,6 @@ async def health_check() -> dict:
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    from src.db.seed import crear_admin_si_falta
+    await crear_admin_si_falta()
     logger.info("Radar Weather System v2 iniciado. Docs: /docs")
