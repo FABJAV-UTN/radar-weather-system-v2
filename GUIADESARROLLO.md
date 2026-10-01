@@ -233,8 +233,12 @@ Hay dos carpetas de scripts a propósito:
 Scripts actuales:
 
 - `src/scripts/reset_admin.py`: resetea o crea el usuario admin.
+- `src/scripts/limpiar_duplicados.py`: borra imágenes con el mismo contenido (MD5 de `raw_data`) y deja la primera de cada grupo. Sin `--aplicar` solo muestra lo que borraría.
+- `src/scripts/demo_tracking.py`: carga 3 tracks SINTÉTICOS (ejecución `demo`) para ver la página de Tracking; `--borrar` los elimina.
 - `scripts/f0_inventario.py`: inventario de eventos, huecos y deriva de georreferenciación (F0 del Subsistema 2). Deja CSV en `salidas_f0/`.
 
 Los scripts de `scripts/` se conectan a `localhost:5432` con los valores de `docker-compose.yml` si no hay `.env`. Antes de correrlos: `docker compose up db -d`.
+
+> **Cortafuegos de duplicados:** el pipeline rechaza una imagen si ya existe otra con los mismos bytes (`hash_raw`), aunque tenga otro nombre u otra hora. En el lote aparece como fallida con el mensaje "Duplicado de contenido".
 
 > El `.env` y la base (volumen `pgdata`) no viajan con git. Al cambiar de computadora hay que recrear el `.env` y restaurar la base con `pg_dump` / `pg_restore`.

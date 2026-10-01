@@ -6,6 +6,7 @@ import { Imagenes } from './pages/Imagenes';
 import { Procesamiento } from './pages/Procesamiento';
 import { ProcesamientoLote } from './pages/ProcesamientoLote';
 import { Configuracion } from './pages/Configuracion';
+import { Tracking } from './pages/Tracking';
 import { Perfil } from './pages/Perfil';
 import { LoteProvider } from './context/LoteContext';
 
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="/imagenes" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
           <Route path="/procesamiento" element={<ProtectedRoute><Procesamiento /></ProtectedRoute>} />
           <Route path="/procesamiento-lote" element={<ProtectedRoute><ProcesamientoLote /></ProtectedRoute>} />
+          <Route path="/tracking" element={<ProtectedRoute><Tracking /></ProtectedRoute>} />
           <Route path="/configuracion" element={<ProtectedRoute><Configuracion /></ProtectedRoute>} />
           <Route path="/perfil" element={<ProtectedRoute><Perfil /></ProtectedRoute>} />
         </Routes>

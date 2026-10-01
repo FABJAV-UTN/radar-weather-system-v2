@@ -11,6 +11,7 @@ export function Layout({ children }) {
     { to: '/imagenes', label: 'Imágenes', icon: '📡' },
     { to: '/procesamiento', label: 'Procesar', icon: '⚙️' },
     { to: '/procesamiento-lote', label: 'Lote', icon: '📁' },
+    { to: '/tracking', label: 'Tracking', icon: '🌀' },
     ...(isAdmin ? [{ to: '/configuracion', label: 'Config', icon: '🔧' }] : []),
   ];
 

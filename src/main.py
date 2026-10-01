@@ -22,6 +22,7 @@ from src.api.routers.auth import router as auth_router
 from src.api.routers.imagenes import router as imagenes_router
 from src.api.routers.procesamiento import router as procesamiento_router
 from src.api.routers.admin import router as admin_router
+from src.api.routers.tormentas import router as tormentas_router
 from src.config import settings
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -60,6 +61,7 @@ app.include_router(auth_router, prefix=API_PREFIX)
 app.include_router(imagenes_router, prefix=API_PREFIX)
 app.include_router(procesamiento_router, prefix=API_PREFIX)
 app.include_router(admin_router, prefix=API_PREFIX)
+app.include_router(tormentas_router, prefix=API_PREFIX)
 
 
 # ── Endpoints base ────────────────────────────────────────────────────────────

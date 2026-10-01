@@ -264,6 +264,15 @@ export const api = {
     URL.revokeObjectURL(url);
   },
 
+  // Tracking de tormentas (Subsistema 2) — fechas AAAA-MM-DD, inclusivas
+  listarTracks: ({ desde, hasta, estado } = {}) => {
+    const query = new URLSearchParams({ desde, hasta });
+    if (estado) query.append('estado', estado);
+    return request(`/tormentas/tracks?${query.toString()}`);
+  },
+
+  obtenerTrack: (id) => request(`/tormentas/tracks/${id}`),
+
   // Admin
   listarUsuarios: (params = {}) => {
     const query = new URLSearchParams();
