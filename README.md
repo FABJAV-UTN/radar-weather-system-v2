@@ -124,6 +124,20 @@ Iniciá sesión con un usuario registrado en la base de datos. Los roles disponi
 
 > El frontend corre con hot reload en modo desarrollo. Los cambios en `frontend_tecnicos/src/` se reflejan automáticamente sin reiniciar el contenedor.
 
+### Resetear o crear el usuario admin
+
+Cada máquina tiene su propia base PostgreSQL en Docker, así que la contraseña del admin puede no coincidir entre equipos. Para dejar el admin con una contraseña conocida (lo crea si no existe, sin tocar el resto de los datos), con los contenedores levantados:
+
+```bash
+# contraseña elegida por vos (mínimo 8 caracteres)
+docker compose exec backend uv run --no-dev python -m src.scripts.reset_admin --password "tuClave12"
+
+# o dejar que genere una aleatoria (la muestra una sola vez)
+docker compose exec backend uv run --no-dev python -m src.scripts.reset_admin
+```
+
+> También acepta `--username` y `--email` (por defecto `admin` / `admin@admin.com`).
+
 ---
 
 ## Comandos útiles
