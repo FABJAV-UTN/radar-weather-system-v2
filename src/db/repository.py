@@ -28,6 +28,7 @@ class ImagenRadarRepository:
         fecha_hora: datetime,
         origen: str,
         raw_data: bytes,
+        hash_raw: str | None = None,
     ) -> ImagenRadar:
         """
         Crea un registro nuevo en estado 'pendiente'.
@@ -36,6 +37,7 @@ class ImagenRadarRepository:
             fecha_hora: Timestamp de la imagen (ya en hora local, UTC-3).
             origen: 'local' o 'url'.
             raw_data: Bytes crudos de la imagen GIF/PNG.
+            hash_raw: MD5 de raw_data (para detectar contenido duplicado).
 
         Returns:
             La instancia persistida con el id asignado.
@@ -44,6 +46,7 @@ class ImagenRadarRepository:
             fecha_hora=fecha_hora,
             origen=origen,
             raw_data=raw_data,
+            hash_raw=hash_raw,
             estado="pendiente",
         )
         self._session.add(imagen)
@@ -79,6 +82,16 @@ class ImagenRadarRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def obtener_por_hash(self, hash_raw: str) -> ImagenRadar | None:
+        """Devuelve la primera imagen (por fecha) con el mismo contenido (MD5 de raw_data)."""
+        result = await self._session.execute(
+            select(ImagenRadar)
+            .where(ImagenRadar.hash_raw == hash_raw)
+            .order_by(ImagenRadar.fecha_hora)
+            .limit(1)
+        )
+        return result.scalars().first()
 
     # Columnas ordenables que viven en imagenes_radar
     _SORT_COLUMNS_DIRECT: dict[str, object] = {

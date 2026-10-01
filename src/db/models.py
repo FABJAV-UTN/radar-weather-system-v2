@@ -61,6 +61,8 @@ class ImagenRadar(Base):
 
     # ── Bytes de imágenes ────────────────────────────────────────────────────
     raw_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    # MD5 de raw_data: cortafuegos contra el mismo archivo cargado con otro nombre/hora
+    hash_raw: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     geotiff_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     clean_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     filled_data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)

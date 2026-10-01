@@ -257,13 +257,14 @@ class TestIntegracionOrquestador:
 
         with (
             patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
-            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository"),
-            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository"),
+            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository", return_value=AsyncMock()),
+            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository", return_value=AsyncMock()),
             patch("src.subsistema1.orquestador.IntentoDescargaRepository"),
             patch("src.subsistema1.orquestador.geolocalizar", return_value=geo_mock),
         ):
             repo_instance = AsyncMock()
-            repo_instance.existe_duplicado = AsyncMock(return_value=False)
+            repo_instance.obtener_por_fecha_hora = AsyncMock(return_value=None)
+            repo_instance.obtener_por_hash = AsyncMock(return_value=None)
             repo_instance.crear = AsyncMock(return_value=imagen_mock)
             repo_instance.actualizar_estado = AsyncMock()
             repo_instance.actualizar_completado = AsyncMock()
@@ -322,8 +323,8 @@ class TestIntegracionOrquestador:
 
         with (
             patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
-            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository"),
-            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository"),
+            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository", return_value=AsyncMock()),
+            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository", return_value=AsyncMock()),
             patch("src.subsistema1.orquestador.IntentoDescargaRepository"),
             patch("src.subsistema1.orquestador.geolocalizar", return_value=_mock_geo_resultado()),
         ):
@@ -355,8 +356,8 @@ class TestIntegracionOrquestador:
         with (
             patch("src.subsistema1.orquestador.ingestar_url", return_value=ingesta_mock),
             patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
-            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository"),
-            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository"),
+            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository", return_value=AsyncMock()),
+            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository", return_value=AsyncMock()),
             patch("src.subsistema1.orquestador.IntentoDescargaRepository") as MockIntento,
             patch("src.subsistema1.orquestador.geolocalizar", return_value=geo_mock),
         ):
@@ -365,7 +366,8 @@ class TestIntegracionOrquestador:
             MockIntento.return_value = intento_inst
 
             repo_instance = AsyncMock()
-            repo_instance.existe_duplicado = AsyncMock(return_value=False)
+            repo_instance.obtener_por_fecha_hora = AsyncMock(return_value=None)
+            repo_instance.obtener_por_hash = AsyncMock(return_value=None)
             repo_instance.crear = AsyncMock(return_value=imagen_db_mock)
             repo_instance.actualizar_estado = AsyncMock()
             repo_instance.actualizar_completado = AsyncMock()
@@ -388,3 +390,96 @@ class TestIntegracionOrquestador:
         assert resultado.metricas.geo.dbz_array is not None
         assert resultado.metricas.geo.dbz_array.dtype == np.uint8
         print(f"[INT] Pipeline URL OK — imagen_id={resultado.imagen_id}, exito={resultado.exito}, dbz_1banda=True")
+
+class TestCortafuegosContenidoDuplicado:
+    """El mismo archivo (mismos bytes) con otro nombre/hora se rechaza."""
+
+    def test_hash_igual_para_mismos_bytes(self):
+        from src.subsistema1.orquestador import calcular_hash_raw
+
+        b = _gif_bytes(_crear_imagen_sin_marco())
+        assert calcular_hash_raw(b) == calcular_hash_raw(bytes(b))
+        assert len(calcular_hash_raw(b)) == 32
+        assert calcular_hash_raw(b) != calcular_hash_raw(b + b"x")
+
+    @pytest.mark.asyncio
+    async def test_local_mismo_contenido_otro_nombre_rechazado(self, tmp_path):
+        """Caso real: mza_20250106_1516.png y mza_20250106_1520.png son el mismo archivo."""
+        from src.subsistema1.orquestador import calcular_hash_raw, ejecutar_pipeline_local
+
+        gif_bytes = _gif_bytes(_crear_imagen_sin_marco(300, 250))
+        archivo = tmp_path / "radar_20250106_152000.gif"
+        archivo.write_bytes(gif_bytes)
+        previa = SimpleNamespace(id=7, fecha_hora=datetime(2025, 1, 6, 15, 16))
+
+        with (
+            patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
+            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository", return_value=AsyncMock()),
+            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository", return_value=AsyncMock()),
+        ):
+            repo = AsyncMock()
+            repo.obtener_por_fecha_hora = AsyncMock(return_value=None)
+            repo.obtener_por_hash = AsyncMock(return_value=previa)
+            repo.crear = AsyncMock()
+            MockImgRepo.return_value = repo
+
+            with pytest.raises(ValueError, match=r"Duplicado de contenido: 'radar_20250106_152000.gif'.*id=7"):
+                await ejecutar_pipeline_local(archivo, _mock_session())
+
+            repo.obtener_por_hash.assert_awaited_once_with(calcular_hash_raw(gif_bytes))
+            repo.crear.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_local_contenido_nuevo_guarda_hash(self, tmp_path):
+        from src.subsistema1.orquestador import calcular_hash_raw, ejecutar_pipeline_local
+
+        gif_bytes = _gif_bytes(_crear_imagen_sin_marco(300, 250))
+        archivo = tmp_path / "radar_20250106_151600.gif"
+        archivo.write_bytes(gif_bytes)
+        imagen_mock = MagicMock()
+        imagen_mock.id = 7
+
+        with (
+            patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
+            patch("src.subsistema1.orquestador.ProcesamentoPasoRepository", return_value=AsyncMock()),
+            patch("src.subsistema1.orquestador.MetricaProcesamientoRepository", return_value=AsyncMock()),
+            patch("src.subsistema1.orquestador.geolocalizar", return_value=_mock_geo_resultado()),
+        ):
+            repo = AsyncMock()
+            repo.obtener_por_fecha_hora = AsyncMock(return_value=None)
+            repo.obtener_por_hash = AsyncMock(return_value=None)
+            repo.crear = AsyncMock(return_value=imagen_mock)
+            MockImgRepo.return_value = repo
+
+            resultado = await ejecutar_pipeline_local(archivo, _mock_session())
+
+        assert resultado.imagen_id == 7
+        assert repo.crear.await_args.kwargs["hash_raw"] == calcular_hash_raw(gif_bytes)
+
+    @pytest.mark.asyncio
+    async def test_url_mismo_contenido_rechazado(self):
+        """Scheduler: si el DACC no actualizó latest.gif, la descarga repetida se descarta."""
+        from src.subsistema1.orquestador import ejecutar_pipeline_url
+
+        imagen_pil = _crear_imagen_sin_marco()
+        ingesta = MagicMock()
+        ingesta.fecha_hora = datetime(2025, 1, 6, 15, 20)
+        ingesta.raw_bytes = _gif_bytes(imagen_pil)
+        ingesta.imagen_pil = imagen_pil
+
+        with (
+            patch("src.subsistema1.orquestador.ingestar_url", return_value=ingesta),
+            patch("src.subsistema1.orquestador.IntentoDescargaRepository") as MockIntento,
+            patch("src.subsistema1.orquestador.ImagenRadarRepository") as MockImgRepo,
+        ):
+            MockIntento.return_value = AsyncMock()
+            repo = AsyncMock()
+            repo.obtener_por_fecha_hora = AsyncMock(return_value=None)
+            repo.obtener_por_hash = AsyncMock(
+                return_value=SimpleNamespace(id=7, fecha_hora=datetime(2025, 1, 6, 15, 16))
+            )
+            MockImgRepo.return_value = repo
+
+            with pytest.raises(ValueError, match=r"Duplicado de contenido"):
+                await ejecutar_pipeline_url(_mock_session())
+            repo.crear.assert_not_awaited()

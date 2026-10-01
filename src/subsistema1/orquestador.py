@@ -24,6 +24,7 @@ IMPORTANTE: El GeoTIFF final tiene 1 banda dBZ (uint8), no 3 bandas RGB.
 """
 
 import asyncio
+import hashlib
 import io
 import logging
 from dataclasses import dataclass, field
@@ -180,6 +181,35 @@ async def _resolver_timestamp(
     )
 
 
+def calcular_hash_raw(raw_bytes: bytes) -> str:
+    """MD5 de los bytes originales. Mismo hash = mismo archivo físico."""
+    return hashlib.md5(raw_bytes).hexdigest()
+
+
+async def _rechazar_si_contenido_duplicado(
+    img_repo: ImagenRadarRepository,
+    hash_raw: str,
+    nombre: str,
+    fecha_hora: datetime,
+) -> None:
+    """
+    Cortafuegos: si ya existe una imagen con exactamente los mismos bytes,
+    se rechaza aunque tenga otro nombre u otra hora. Pasa cuando la fuente
+    guarda dos veces seguidas el mismo latest.gif (el radar no se actualizó).
+    Se conserva la primera que entró; como los lotes se procesan ordenados,
+    es la de hora más temprana.
+    """
+    existente = await img_repo.obtener_por_hash(hash_raw)
+    if existente is not None:
+        mensaje = (
+            f"Duplicado de contenido: '{nombre}' timestamp={fecha_hora.strftime('%Y-%m-%d %H:%M:%S')} "
+            f"es idéntico a imagen id={existente.id} "
+            f"timestamp={existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')} (md5={hash_raw[:10]})"
+        )
+        logger.warning(mensaje)
+        raise ValueError(mensaje)
+
+
 async def ejecutar_pipeline_local(
     file_path: Path,
     session: AsyncSession,
@@ -215,7 +245,10 @@ async def ejecutar_pipeline_local(
         logger.warning("Duplicado detectado: %s local", fecha_hora_final)
         raise ValueError(mensaje)
 
-    imagen = await img_repo.crear(fecha_hora_final, "local", ingesta.raw_bytes)
+    hash_raw = calcular_hash_raw(ingesta.raw_bytes)
+    await _rechazar_si_contenido_duplicado(img_repo, hash_raw, file_path.name, fecha_hora_final)
+
+    imagen = await img_repo.crear(fecha_hora_final, "local", ingesta.raw_bytes, hash_raw=hash_raw)
     imagen_id = imagen.id
     await img_repo.actualizar_estado(imagen_id, "procesando")
     await _verificar_cancelacion(request)
@@ -274,7 +307,10 @@ async def ejecutar_pipeline_url(
         logger.warning("Duplicado URL detectado: %s", fecha_hora_final)
         raise ValueError(mensaje)
 
-    imagen = await img_repo.crear(fecha_hora_final, "url", ingesta.raw_bytes)
+    hash_raw = calcular_hash_raw(ingesta.raw_bytes)
+    await _rechazar_si_contenido_duplicado(img_repo, hash_raw, target_url, fecha_hora_final)
+
+    imagen = await img_repo.crear(fecha_hora_final, "url", ingesta.raw_bytes, hash_raw=hash_raw)
     imagen_id = imagen.id
     await img_repo.actualizar_estado(imagen_id, "procesando")
     await _verificar_cancelacion(request)

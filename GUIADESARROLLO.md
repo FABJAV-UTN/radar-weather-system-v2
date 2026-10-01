@@ -218,3 +218,23 @@ Usuario hace click "Procesar URL"
   → Backend: devuelve PipelineResponse al frontend
   → Frontend: muestra resultado con score de geolocalización
 ```
+
+---
+
+## Scripts — dónde va cada uno
+
+Hay dos carpetas de scripts a propósito:
+
+| Carpeta | Para qué | Cómo se corre |
+|---|---|---|
+| `src/scripts/` | Comandos de operación del sistema (usuario admin, mantenimiento, reprocesos). Tienen que estar en `src/` porque el contenedor solo monta `./src`. | `docker compose exec backend uv run --no-dev python -m src.scripts.<nombre>` |
+| `scripts/` | Herramientas de desarrollo y análisis que generan archivos (F0, validación, exportes para QGIS). Corren en el host y escriben en la carpeta del repo. | `uv run python scripts/<nombre>.py` |
+
+Scripts actuales:
+
+- `src/scripts/reset_admin.py`: resetea o crea el usuario admin.
+- `scripts/f0_inventario.py`: inventario de eventos, huecos y deriva de georreferenciación (F0 del Subsistema 2). Deja CSV en `salidas_f0/`.
+
+Los scripts de `scripts/` se conectan a `localhost:5432` con los valores de `docker-compose.yml` si no hay `.env`. Antes de correrlos: `docker compose up db -d`.
+
+> El `.env` y la base (volumen `pgdata`) no viajan con git. Al cambiar de computadora hay que recrear el `.env` y restaurar la base con `pg_dump` / `pg_restore`.
