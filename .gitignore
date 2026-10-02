@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Salidas de scripts de análisis del Subsistema 2 (se regeneran)
+salidas_f2/

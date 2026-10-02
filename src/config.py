@@ -36,6 +36,23 @@ class Settings(BaseSettings):
     # ── Limpieza de imagen ───────────────────────────────────────────────────
     color_threshold: float = 30.0
 
+    # ── Subsistema 2: detección de celdas (F2) ───────────────────────────────
+    # Decisiones D1–D6 del plan. Se guardan en ejecuciones_tracking.parametros.
+    s2_umbral_dbz: float = 35.0          # D1: píxel de celda si dBZ >= umbral
+    s2_umbral_nucleo_dbz: float = 45.0   # D2: núcleo intenso dentro de la celda
+    s2_area_min_km2: float = 4.0         # D3: celdas más chicas se descartan
+    s2_conectividad: int = 8             # D4: 4 u 8 vecinos
+    s2_srid: int = 5344                  # D5: POSGAR 2007 / Argentina faja 2
+    # Grilla fija de cálculo en EPSG:5344: todas las imágenes se reproyectan a
+    # la MISMA grilla, así las máscaras de t-1 y t se pueden superponer (F3).
+    # Cubre el marco más grande del radar (template tif800: lon −70,7° a −65,1°,
+    # lat −36,7° a −31,3°) con ~10 km de margen. 847 × 954 píxeles de 650 m.
+    s2_resolucion_m: float = 650.0
+    s2_grilla_xmin: float = 2_330_000.0
+    s2_grilla_ymax: float = 6_550_100.0
+    s2_grilla_ancho: int = 847
+    s2_grilla_alto: int = 954
+
     # ── Auth / JWT ───────────────────────────────────────────────────────────
     secret_key: str
     algorithm: str = "HS256"

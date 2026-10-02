@@ -57,6 +57,10 @@ src/
     ├── geolocalizar.py   # Fase 6: georreferenciación con template matching
     ├── ocr.py            # Extracción de timestamp via OCR (Tesseract)
     └── scheduler.py      # Procesamiento continuo automático (loop async)
+└── subsistema2/          # Seguimiento de tormentas (en construcción, ver abajo)
+    ├── modelos.py        # Dataclasses en memoria (Celda)
+    ├── raster.py         # GeoTIFF (bytes) → dBZ en la grilla fija EPSG:5344
+    └── detector.py       # F2: umbral, componentes conexas y atributos de cada celda
 ```
 
 ---
@@ -131,6 +135,26 @@ Fase 7: Persistencia
 ```
 
 **Nota importante:** las fases CPU-intensivas (2 a 6) se ejecutan en un thread pool con `asyncio.to_thread()` para no bloquear el event loop de FastAPI.
+
+---
+
+### Subsistema 2 — Seguimiento de tormentas (en construcción)
+
+Plan completo: `PROYECTO CLIMA/SUBSISTEMA 2/Plan de acción — Subsistema 2 Seguimiento de tormentas.docx`. Bitácoras por fase en `PROYECTO CLIMA/SUBSISTEMA 2/F<n>/`.
+
+Igual que en el Subsistema 1, la lógica de cálculo no toca la base: trabaja con arrays y dataclasses, y solo el orquestador (F5) y los repositorios (`db/repository_tracking.py`) leen y escriben.
+
+```
+imagenes_radar.geotiff_data (EPSG:3857, uint8)
+  └─► raster.cargar_en_grilla()   reproyecta a la grilla fija 5344 (650 m, vecino más cercano)
+      └─► detector.detectar()     umbral D1 → conexas D4 → área mínima D3 → atributos
+          └─► list[Celda] + matriz de etiquetas
+              └─► Celda.a_celda_nueva() → CeldaTormentaRepository.crear_varias()
+```
+
+- **Grilla fija:** todas las imágenes se reproyectan a la misma grilla (847 × 954 píxeles de 650 m que cubren el marco más grande del radar). Así las máscaras de dos imágenes se superponen píxel a píxel, que es lo que necesita el tracker (F3) para asociar por solapamiento.
+- **Parámetros:** D1–D5 y la grilla están en `config.py` (`S2_*`). `ParametrosDeteccion.como_dict()` y `Grilla.como_dict()` van a `ejecuciones_tracking.parametros`.
+- **D13 (saltos de georreferenciación):** `cargar_en_grilla(..., transform_origen=...)` permite reemplazar el transform de una imagen por el mediano del evento; lo decide el orquestador (F5).
 
 ---
 
@@ -236,6 +260,7 @@ Scripts actuales:
 - `src/scripts/limpiar_duplicados.py`: borra imágenes con el mismo contenido (MD5 de `raw_data`) y deja la primera de cada grupo. Sin `--aplicar` solo muestra lo que borraría.
 - `src/scripts/demo_tracking.py`: carga 3 tracks SINTÉTICOS (ejecución `demo`) para ver la página de Tracking; `--borrar` los elimina.
 - `scripts/f0_inventario.py`: inventario de eventos, huecos y deriva de georreferenciación (F0 del Subsistema 2). Deja CSV en `salidas_f0/`.
+- `scripts/f2_detectar.py`: corre el detector de celdas (F2) sobre imágenes de la base, sin escribir en ella, y deja en `salidas_f2/` el raster reproyectado, `celdas.geojson`, `centroides.geojson` y `celdas.csv` para revisar en QGIS. Filtros: `--desde`, `--hasta`, `--imagen-id`.
 
 Los scripts de `scripts/` se conectan a `localhost:5432` con los valores de `docker-compose.yml` si no hay `.env`. Antes de correrlos: `docker compose up db -d`.
 
