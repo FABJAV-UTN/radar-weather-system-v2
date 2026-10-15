@@ -131,13 +131,30 @@ WHERE imagen_id = 42
 ORDER BY ejecutado_en ASC;
 ```
 
-### Ver historial de intentos de descarga URL
+### Ver historial de intentos de descarga URL (auditoría)
+
+Desde el 15/10/2026 **cada** intento queda registrado, positivo o negativo
+(antes los negativos se perdían por rollback). `fecha_intento` está en UTC.
+`motivo_fallo` = `<categoria>: <detalle>`, con categoría `descarga`, `ocr`,
+`duplicado_hora`, `duplicado_contenido`, `pipeline` o `cancelado`.
+En los rechazos por `descarga` (GIF incompleto) y `ocr`, `archivo` guarda el
+GIF recibido para diagnóstico (exportar: `scripts/exportar_rechazados.py`).
 
 ```sql
-SELECT url, exitoso, motivo_fallo, intento_numero, fecha_intento
+SELECT url, exitoso, motivo_fallo, intento_numero, fecha_intento,
+       archivo IS NOT NULL AS tiene_gif
 FROM radar.intentos_descarga
 ORDER BY fecha_intento DESC
 LIMIT 50;
+```
+
+Resumen por hora y motivo:
+
+```sql
+SELECT date_trunc('hour', fecha_intento) AS hora_utc, exitoso,
+       split_part(motivo_fallo, ':', 1) AS categoria, count(*)
+FROM radar.intentos_descarga
+GROUP BY 1, 2, 3 ORDER BY 1;
 ```
 
 ### Vista resumen del pipeline
@@ -218,7 +235,20 @@ WHERE imagen_id IN (SELECT id FROM radar.imagenes_radar WHERE estado = 'error');
 DELETE FROM radar.imagenes_radar WHERE estado = 'error';
 ```
 
+### Mantenimiento: vaciar los GIF rechazados viejos (recomendado)
+
+Libera el espacio de los GIF guardados en `intentos_descarga.archivo` con más
+de 30 días, **sin borrar la fila de auditoría**:
+
+```bash
+docker compose exec backend uv run --no-dev python -m src.scripts.limpiar_intentos            # simula
+docker compose exec backend uv run --no-dev python -m src.scripts.limpiar_intentos --aplicar  # aplica
+```
+
 ### Borrar intentos de descarga fallidos (sin tocar imágenes)
+
+> Ojo: esto borra la auditoría de los rechazos. Para liberar espacio alcanza
+> con el script de arriba.
 
 ```sql
 DELETE FROM radar.intentos_descarga WHERE exitoso = FALSE;

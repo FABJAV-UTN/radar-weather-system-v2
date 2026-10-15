@@ -38,7 +38,7 @@ radar-weather-system-v2/
 │   └── db/                 # Modelos, conexión, repositorios
 ├── frontend_tecnicos/      # Frontend React (Vite + Tailwind)
 ├── alembic/                # Migraciones de base de datos
-├── templates/              # Templates GeoTIFF para geolocalización
+├── templates/              # Templates de eco fijo + geometrias_gif.json (geolocalización)
 ├── Dockerfile.backend
 ├── docker-compose.yml
 └── pyproject.toml

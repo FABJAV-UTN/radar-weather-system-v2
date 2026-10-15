@@ -170,6 +170,9 @@ class IntentoDescarga(Base):
     exitoso: Mapped[bool] = mapped_column(Boolean, nullable=False)
     motivo_fallo: Mapped[str | None] = mapped_column(String(100), nullable=True)
     intento_numero: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Bytes descargados en un intento RECHAZADO (para diagnóstico). NULL en los
+    # positivos y después de la limpieza (src/scripts/limpiar_intentos.py).
+    archivo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     fecha_intento: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp(), index=True
     )

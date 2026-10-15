@@ -14,6 +14,7 @@ Sin persistencia directa: devuelve los bytes crudos y el timestamp al orquestado
 que decide si hay duplicado antes de crear el registro en base de datos.
 """
 
+import asyncio
 import io
 import logging
 import re
@@ -21,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from src.config import settings
 logger = logging.getLogger(__name__)
@@ -31,11 +32,19 @@ _YEAR_MAX = 2100
 _UBICACION_DEFAULT = "mendoza"
 _PREFIJO_UBICACION_RE = re.compile(r"^([a-zA-Z]+)")
 
+# ── Validación de descarga (desde 15/10/2026) ────────────────────────────────
+# La madrugada del 13/10 muchos GIF llegaron cortados ("image file is
+# truncated") o no eran imagen ("cannot identify image file"): el DACC
+# reescribe latest.gif y a veces se baja a mitad de escritura. Se valida la
+# descarga y, si llegó mal, se espera y se reintenta.
+DESCARGA_INTENTOS: int = 3        # intentos en total por ciclo del scheduler
+DESCARGA_ESPERA_S: float = 5.0    # espera entre intentos (el DACC termina de escribir)
+
 
 class IngestaResultado:
     """Resultado de la ingesta: bytes crudos + metadatos."""
 
-    __slots__ = ("raw_bytes", "fecha_hora", "origen", "imagen_pil")
+    __slots__ = ("raw_bytes", "fecha_hora", "origen", "imagen_pil", "intentos_descarga")
 
     def __init__(
         self,
@@ -43,11 +52,61 @@ class IngestaResultado:
         fecha_hora: datetime | None,
         origen: str,
         imagen_pil: Image.Image,
+        intentos_descarga: int = 1,
     ) -> None:
         self.raw_bytes = raw_bytes
         self.fecha_hora = fecha_hora
         self.origen = origen
         self.imagen_pil = imagen_pil
+        self.intentos_descarga = intentos_descarga
+
+
+class DescargaIncompletaError(Exception):
+    """La descarga no trajo una imagen completa ni después de reintentar.
+
+    raw_bytes: lo último que se recibió (para guardarlo en la auditoría y
+    poder mirarlo después).
+    """
+
+    def __init__(self, mensaje: str, raw_bytes: bytes = b"") -> None:
+        super().__init__(mensaje)
+        self.raw_bytes = raw_bytes
+
+
+def _content_length(response) -> str | None:
+    """Content-Length informado por el servidor, solo si el cuerpo no viene
+    comprimido (con gzip el largo informado no es el de los bytes finales)."""
+    headers = getattr(response, "headers", None)
+    try:
+        if headers is None or headers.get("content-encoding"):
+            return None
+        valor = headers.get("content-length")
+    except Exception:
+        return None
+    return valor if isinstance(valor, str) else None
+
+
+def validar_imagen_descargada(raw_bytes: bytes, content_length: str | None = None) -> str | None:
+    """Devuelve None si la imagen llegó completa; si no, el motivo.
+
+    1. Tamaño: si el servidor informó Content-Length, tiene que coincidir.
+    2. Decodificación COMPLETA: Image.open solo lee la cabecera; load() lee
+       todos los píxeles y es lo que detecta un GIF cortado.
+    """
+    if not raw_bytes:
+        return "respuesta vacía"
+    if isinstance(content_length, str) and content_length.isdigit():
+        esperado = int(content_length)
+        if len(raw_bytes) != esperado:
+            return f"tamaño {len(raw_bytes)} de {esperado} bytes"
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as img:
+            img.load()
+    except UnidentifiedImageError:
+        return "no es una imagen"
+    except (OSError, SyntaxError, ValueError) as exc:
+        return f"imagen incompleta ({exc})"
+    return None
 
 
 def _apply_timezone_offset(dt: datetime) -> datetime:
@@ -241,16 +300,34 @@ async def ingestar_url(url: str | None = None) -> IngestaResultado:
 
     Raises:
         httpx.HTTPError: Si falla la descarga.
+        DescargaIncompletaError: Si la imagen llega cortada o no es imagen
+            después de DESCARGA_INTENTOS intentos (con DESCARGA_ESPERA_S entre
+            cada uno).
     """
     from urllib.parse import urlparse
 
     target_url = url or settings.radar_url
 
+    raw_bytes = b""
+    motivo: str | None = None
+    intento = 0
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        logger.info("Descargando desde: %s", target_url)
-        response = await client.get(target_url)
-        response.raise_for_status()
-        raw_bytes = response.content
+        for intento in range(1, DESCARGA_INTENTOS + 1):
+            logger.info("Descargando desde: %s (intento %d/%d)", target_url, intento, DESCARGA_INTENTOS)
+            response = await client.get(target_url)
+            response.raise_for_status()
+            raw_bytes = response.content
+            motivo = validar_imagen_descargada(raw_bytes, _content_length(response))
+            if motivo is None:
+                break
+            logger.warning("Descarga incompleta (%s), intento %d/%d", motivo, intento, DESCARGA_INTENTOS)
+            if intento < DESCARGA_INTENTOS:
+                await asyncio.sleep(DESCARGA_ESPERA_S)
+
+    if motivo is not None:
+        raise DescargaIncompletaError(
+            f"GIF incompleto tras {DESCARGA_INTENTOS} intentos: {motivo}", raw_bytes
+        )
 
     imagen = Image.open(io.BytesIO(raw_bytes))
     nombre_url = Path(urlparse(target_url).path).name or "latest.gif"
@@ -267,4 +344,5 @@ async def ingestar_url(url: str | None = None) -> IngestaResultado:
         fecha_hora=fecha_hora,
         origen="url",
         imagen_pil=imagen,
+        intentos_descarga=intento,
     )

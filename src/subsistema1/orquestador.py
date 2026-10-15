@@ -28,13 +28,14 @@ import hashlib
 import io
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.db.connection import AsyncSessionLocal
 from src.db.repository import (
     ImagenRadarRepository,
     IntentoDescargaRepository,
@@ -44,7 +45,12 @@ from src.db.repository import (
 from src.subsistema1.crop import crop_imagen
 from src.subsistema1.detector_marco import detectar_marco
 from src.subsistema1.geolocalizar import GeoResultado, geolocalizar
-from src.subsistema1.ingestor import IngestaResultado, ingestar_local, ingestar_url
+from src.subsistema1.ingestor import (
+    DescargaIncompletaError,
+    IngestaResultado,
+    ingestar_local,
+    ingestar_url,
+)
 from src.subsistema1.limpiar import clean_image
 from src.subsistema1.ocr import extract_timestamp
 from src.subsistema1.rellenar import fill_gaps
@@ -80,6 +86,65 @@ class ResultadoPipeline:
 class PipelineCanceladoError(Exception):
     """Se lanza cuando el cliente cancela la petición durante el pipeline."""
     pass
+
+
+class DuplicadoError(ValueError):
+    """Imagen descartada por duplicada. Hereda de ValueError: el scheduler la
+    sigue tratando como "ciclo saltado".
+
+    categoria: "duplicado_hora" (ya hay una imagen con esa hora) o
+               "duplicado_contenido" (mismos bytes: el DACC no actualizó el GIF).
+    """
+
+    def __init__(self, categoria: str, mensaje: str) -> None:
+        super().__init__(mensaje)
+        self.categoria = categoria
+
+
+# ── Auditoría de descargas (radar.intentos_descarga) ─────────────────────────
+#
+# Cada intento de descarga desde la URL del DACC (scheduler o botón "procesar
+# URL") queda registrado con: fecha y hora del intento, si fue positivo o
+# negativo y, si fue negativo, el motivo como "<categoria>: <detalle>".
+#
+# Se graba con una sesión PROPIA y su propio commit. Antes se grababa en la
+# sesión del pipeline y, cuando el intento se descartaba (duplicado, OCR,
+# error), el rollback se lo llevaba: solo quedaban los positivos y los huecos
+# no tenían explicación (madrugada del 13/10/2026).
+#
+# Categorías de motivo:
+#   descarga             el DACC no respondió, devolvió error, o el GIF llegó
+#                        incompleto incluso después de reintentar
+#   ocr                  no se pudo determinar la fecha/hora de la imagen
+#   duplicado_hora       ya existe una imagen con esa hora
+#   duplicado_contenido  mismos bytes que una imagen ya guardada
+#   pipeline             falló una fase posterior (la imagen queda en 'error')
+#   cancelado            el cliente canceló o se interrumpió el proceso
+#
+# En los rechazos por GIF incompleto y por OCR se guardan además los bytes
+# descargados (columna archivo), para poder mirarlos. Duplicados no: ese
+# contenido ya está en la base. Limpieza: src/scripts/limpiar_intentos.py.
+
+async def _registrar_intento(
+    url: str,
+    exitoso: bool,
+    motivo: str | None,
+    fecha_intento: datetime,
+    session_factory=None,
+    archivo: bytes | None = None,
+) -> None:
+    """Graba el intento en su propia transacción. Nunca rompe el pipeline:
+    si la auditoría falla, se loguea y se sigue."""
+    factory = session_factory or AsyncSessionLocal
+    try:
+        async with factory() as sesion:
+            await IntentoDescargaRepository(sesion).registrar(
+                url, exitoso=exitoso, motivo_fallo=motivo, fecha_intento=fecha_intento,
+                archivo=archivo,
+            )
+            await sesion.commit()
+    except Exception:
+        logger.exception("Auditoría: no se pudo registrar el intento de descarga (%s)", url)
 
 
 def _calcular_metricas(
@@ -207,7 +272,7 @@ async def _rechazar_si_contenido_duplicado(
             f"timestamp={existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')} (md5={hash_raw[:10]})"
         )
         logger.warning(mensaje)
-        raise ValueError(mensaje)
+        raise DuplicadoError("duplicado_contenido", mensaje)
 
 
 async def ejecutar_pipeline_local(
@@ -243,7 +308,7 @@ async def ejecutar_pipeline_local(
             f"timestamp={imagen_existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')}"
         )
         logger.warning("Duplicado detectado: %s local", fecha_hora_final)
-        raise ValueError(mensaje)
+        raise DuplicadoError("duplicado_hora", mensaje)
 
     hash_raw = calcular_hash_raw(ingesta.raw_bytes)
     await _rechazar_si_contenido_duplicado(img_repo, hash_raw, file_path.name, fecha_hora_final)
@@ -273,57 +338,92 @@ async def ejecutar_pipeline_url(
     Ejecuta el pipeline completo para la descarga desde URL DACC (Ruta B).
 
     Timestamp: marco → OCR (UTC-3); sin marco → nombre en la URL si aplica.
+
+    Auditoría: cada llamada deja UNA fila en radar.intentos_descarga (fecha y
+    hora del intento, positivo/negativo y motivo), con commit propio, aunque el
+    intento se descarte. Ver _registrar_intento.
     """
     img_repo = ImagenRadarRepository(session)
     paso_repo = ProcesamentoPasoRepository(session)
     metrica_repo = MetricaProcesamientoRepository(session)
-    intento_repo = IntentoDescargaRepository(session)
 
     from src.config import settings
     target_url = url or settings.radar_url
 
+    # Auditoría: se registra SIEMPRE al salir (finally), con commit propio.
+    fecha_intento = datetime.now(UTC).replace(tzinfo=None)
+    etapa = "descarga"
+    exitoso = False
+    motivo: str | None = None
+    archivo_rechazado: bytes | None = None
+
     try:
         ingesta = await ingestar_url(target_url)
-        await intento_repo.registrar(target_url, exitoso=True)
-    except Exception as e:
-        await intento_repo.registrar(target_url, exitoso=False, motivo_fallo=str(e)[:100])
-        raise
+        await _verificar_cancelacion(request)
 
-    await _verificar_cancelacion(request)
+        etapa = "ocr"
+        try:
+            fecha_hora_final = await _resolver_timestamp(
+                ingesta.imagen_pil,
+                ingesta.fecha_hora,
+                "url",
+            )
+        except Exception:
+            archivo_rechazado = ingesta.raw_bytes
+            raise
 
-    fecha_hora_final = await _resolver_timestamp(
-        ingesta.imagen_pil,
-        ingesta.fecha_hora,
-        "url",
-    )
+        etapa = "pipeline"
+        imagen_existente = await img_repo.obtener_por_fecha_hora(fecha_hora_final, "url")
+        if imagen_existente is not None:
+            mensaje = (
+                f"Duplicado: URL '{target_url}' timestamp={fecha_hora_final.strftime('%Y-%m-%d %H:%M:%S')}; "
+                f"ya existe imagen id={imagen_existente.id} origen=url "
+                f"timestamp={imagen_existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            logger.warning("Duplicado URL detectado: %s", fecha_hora_final)
+            raise DuplicadoError("duplicado_hora", mensaje)
 
-    imagen_existente = await img_repo.obtener_por_fecha_hora(fecha_hora_final, "url")
-    if imagen_existente is not None:
-        mensaje = (
-            f"Duplicado: URL '{target_url}' timestamp={fecha_hora_final.strftime('%Y-%m-%d %H:%M:%S')}; "
-            f"ya existe imagen id={imagen_existente.id} origen=url "
-            f"timestamp={imagen_existente.fecha_hora.strftime('%Y-%m-%d %H:%M:%S')}"
+        hash_raw = calcular_hash_raw(ingesta.raw_bytes)
+        await _rechazar_si_contenido_duplicado(img_repo, hash_raw, target_url, fecha_hora_final)
+
+        imagen = await img_repo.crear(fecha_hora_final, "url", ingesta.raw_bytes, hash_raw=hash_raw)
+        imagen_id = imagen.id
+        await img_repo.actualizar_estado(imagen_id, "procesando")
+        await _verificar_cancelacion(request)
+
+        resultado = await _ejecutar_fases_comunes(
+            imagen_id=imagen_id,
+            pil_image=ingesta.imagen_pil,
+            raw_bytes=ingesta.raw_bytes,
+            img_repo=img_repo,
+            paso_repo=paso_repo,
+            metrica_repo=metrica_repo,
+            request=request,
         )
-        logger.warning("Duplicado URL detectado: %s", fecha_hora_final)
-        raise ValueError(mensaje)
+        if resultado.exito:
+            exitoso = True
+        else:
+            motivo = f"pipeline: {resultado.mensaje_error}"
+        return resultado
 
-    hash_raw = calcular_hash_raw(ingesta.raw_bytes)
-    await _rechazar_si_contenido_duplicado(img_repo, hash_raw, target_url, fecha_hora_final)
-
-    imagen = await img_repo.crear(fecha_hora_final, "url", ingesta.raw_bytes, hash_raw=hash_raw)
-    imagen_id = imagen.id
-    await img_repo.actualizar_estado(imagen_id, "procesando")
-    await _verificar_cancelacion(request)
-
-    return await _ejecutar_fases_comunes(
-        imagen_id=imagen_id,
-        pil_image=ingesta.imagen_pil,
-        raw_bytes=ingesta.raw_bytes,
-        img_repo=img_repo,
-        paso_repo=paso_repo,
-        metrica_repo=metrica_repo,
-        request=request,
-    )
+    except DuplicadoError as exc:
+        motivo = f"{exc.categoria}: {exc}"
+        raise
+    except DescargaIncompletaError as exc:
+        motivo = f"descarga: {exc}"
+        archivo_rechazado = exc.raw_bytes or None
+        raise
+    except PipelineCanceladoError as exc:
+        motivo = f"cancelado: {exc}"
+        raise
+    except Exception as exc:
+        motivo = f"{etapa}: {type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if not exitoso and motivo is None:
+            motivo = "cancelado: proceso interrumpido"
+        await _registrar_intento(target_url, exitoso, motivo, fecha_intento,
+                                 archivo=archivo_rechazado)
 
 
 async def _ejecutar_fases_comunes(
@@ -385,10 +485,14 @@ async def _ejecutar_fases_comunes(
         geo = await asyncio.to_thread(geolocalizar, filled_rgb, dbz_map)
         metricas.geo = geo
         metricas.score_match = geo.score_match
-        logger.info("[img=%d] Fase 6 — geo ok, score=%.4f, clutter_px=%d, dbz_banda_unica=%s",
-                    imagen_id, geo.score_match,
-                    int(np.count_nonzero(geo.clutter_mask)) if geo.clutter_mask is not None else 0,
-                    geo.dbz_array is not None)
+        logger.info("[img=%d] Fase 6 — geo ok, estado=%s, variante=%s, corrimiento=%s, "
+                    "score=%.4f, clutter_px=%d",
+                    imagen_id, geo.estado_geo, geo.variante, geo.corrimiento_px,
+                    geo.score_match,
+                    int(np.count_nonzero(geo.clutter_mask)) if geo.clutter_mask is not None else 0)
+        if geo.estado_geo == "legado_sin_calibrar":
+            logger.warning("[img=%d] Geo por método legado (tamaño sin variante calibrada): "
+                           "revisar antes de usar en Subsistema 2", imagen_id)
         await paso_repo.registrar(imagen_id, "geolocalizacion")
         await _verificar_cancelacion(request)
 

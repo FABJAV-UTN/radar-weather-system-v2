@@ -1,53 +1,48 @@
 from __future__ import annotations
 """
-Fase 6 del pipeline: Geolocalización mediante template matching del eco fijo.
+Fase 6 del pipeline: Geolocalización.
 
-Corrige el Affine Transform de la imagen comparando la posición del eco fijo
-(estructura geográfica permanente) con su posición real conocida.
+Desde el 15/10/2026 (incidente del 13/10, ver SUBSISTEMA 1/GEO_ROBUSTO/informe_geo_robusto.tex)
+la geolocalización separa dos preguntas:
 
-Sin I/O directo al pipeline principal: escribe el GeoTIFF final a un buffer
-BytesIO que se persiste en la base de datos.
+  1. GEOMETRÍA del GIF (escala, proyección, dónde está el 0 km): no se adivina
+     imagen por imagen. Se calibra UNA vez por variante (tamaño de recorte) y se
+     guarda en templates/geometrias_gif.json. El GIF es una grilla en km centrada
+     en el radar → proyección nativa azimutal equidistante (AEQD), 722,54 m/px.
+  2. CORRIMIENTO de cada imagen respecto de su variante (jitter del recorte): lo
+     mide el template matching del eco fijo, pero acotado y validado.
 
-IMPORTANTE: El GeoTIFF de salida tiene 1 banda (uint8) con valores dBZ 
-(0=NoData, 10-80=niveles de precipitación), NO 3 bandas RGB.
+Camino robusto (imagen con variante calibrada):
+  capa 0    cargar_geometrias / elegir_geometria
+  capa 1    template_a_dbz / mascara_dbz / elegir_umbral   (solo ecos >= 35 dBZ)
+  capa 2    buscar_en_ventana                              (±25 px de lo esperado)
+  capa 4    combinar_corrimientos                          (dos templates = dos testigos)
+  capa 3+5  decidir_corrimiento                            (mover solo con 2 testigos y > 3 px)
+  luego     mascara_clutter (posición REAL) → _apply_dbz_filters → reproyectar (nearest)
+            → GeoTIFF con etiquetas GEO_*
 
-INCLUYE: Color Table para que QGIS/ArcGIS muestren los colores del radar
-automáticamente (no en escala de grises).
+Camino legado (tamaño sin variante calibrada, p. ej. el banco de imágenes
+irregulares): template matching en cascada de siempre (_geolocalizar_legado),
+con el resultado MARCADO como "legado_sin_calibrar".
+
+IMPORTANTE: El GeoTIFF de salida tiene 1 banda (uint8) con valores dBZ
+(0=NoData, 10-80=niveles de precipitación) y Color Table.
 """
-'''
-los pasos de geolocalización son:
-1. Extraer máscara de forma del array RGB (para template matching).
-2. Cargar todos los templates eco disponibles (eco fijo 1 y 2).
-3. Template matching en cascada (masked → classic) con verificación
-   de forma (IoU + Corr) por ancho incremental. Se corre para cada
-   template eco y se elige el mejor match.
-4. Calcular la georreferenciación completa directamente proyectando la
-   posición real del eco (Ground Truth) y su tamaño de píxel hacia el origen (0,0).
-5. Construir máscara booleana de clutter (ecos fijos) por forma exacta,
-   sin margen rectangular para no eliminar tormenta real adyacente.
-6. Aplicar filtros al dbz_map:
-    - Poner a 0 los píxeles de eco fijo (clutter_mask).
-    - Poner a 0 los píxeles con dBZ < 10.
-    - Poner a 0 los píxeles con color verde de marca de agua.
-7. Generar GeoTIFF final en memoria (BytesIO) con 1 banda dBZ uint8
-    y Color Table para que se muestre con colores (no escala de grises).    
-
-básicamente, el pipeline de geolocalización toma la imagen de radar post-relleno (filled_rgb) y el mapa dBZ (dbz_map) como entrada.
-luego realiza una serie de pasos para geolocalizar la imagen y generar un GeoTIFF final con información geoespacial precisa.
-la matemática que usa es principalmente la correlación y la intersección sobre unión (IoU) para verificar la coincidencia entre 
-la imagen de radar y los templates de eco fijo.
-'''
-
-
 import io
+import json
 import logging
+import math
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
 import numpy as np
 import rasterio
 from PIL import Image
+from rasterio.crs import CRS
 from rasterio.transform import Affine
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from src.config import settings
 
@@ -587,6 +582,7 @@ def dbz_array_to_geotiff_bytes(
     crs: object,
     compress: str = COMPRESS,
     nodata: int = 0,
+    etiquetas_geo: dict[str, str] | None = None,
 ) -> bytes:
     """
     Convierte un array dBZ (H, W) uint8 a bytes de GeoTIFF en memoria.
@@ -603,6 +599,8 @@ def dbz_array_to_geotiff_bytes(
         crs: Sistema de coordenadas (ej. EPSG:4326).
         compress: Algoritmo de compresión.
         nodata: Valor para píxeles sin datos (default 0).
+        etiquetas_geo: Etiquetas GEO_* de trazabilidad (se ven en QGIS →
+            Propiedades → Metadatos).
 
     Returns:
         Bytes del GeoTIFF listo para persistir o descargar.
@@ -628,6 +626,7 @@ def dbz_array_to_geotiff_bytes(
             NODATA_VALUE=str(nodata),
             SOURCE="DACC Mendoza - Radar Meteorológico",
             COLOR_TABLE="Paleta de colores dBZ estándar del radar DACC Mendoza",
+            **(etiquetas_geo or {}),
         )
 
     buffer.seek(0)
@@ -694,7 +693,11 @@ class GeoResultado:
         "delta_lon",
         "delta_lat",
         "clutter_mask",
-        "dbz_array",  # NUEVO: array dBZ exportado (1 banda)
+        "dbz_array",       # array dBZ exportado (1 banda, grilla de SALIDA)
+        "estado_geo",      # corregido | nominal_* | legado_sin_calibrar
+        "corrimiento_px",  # (dc, dr) aplicado respecto de la variante
+        "variante",        # nombre de la variante calibrada (None en legado)
+        "umbral_dbz",      # umbral usado para el matching
     )
 
     def __init__(
@@ -707,6 +710,10 @@ class GeoResultado:
         delta_lat: float,
         clutter_mask: np.ndarray | None = None,
         dbz_array: np.ndarray | None = None,
+        estado_geo: str | None = None,
+        corrimiento_px: tuple[float, float] | None = None,
+        variante: str | None = None,
+        umbral_dbz: int | None = None,
     ) -> None:
         self.geotiff_bytes = geotiff_bytes
         self.transform_affine = transform_affine
@@ -715,15 +722,24 @@ class GeoResultado:
         self.delta_lon = delta_lon
         self.delta_lat = delta_lat
         self.clutter_mask = clutter_mask
-        self.dbz_array = dbz_array  # NUEVO
+        self.dbz_array = dbz_array
+        self.estado_geo = estado_geo
+        self.corrimiento_px = corrimiento_px
+        self.variante = variante
+        self.umbral_dbz = umbral_dbz
 
 
-def geolocalizar(
+def _geolocalizar_legado(
     filled_rgb: np.ndarray,
     dbz_map: np.ndarray,
 ) -> GeoResultado:
     """
-    Pipeline completo de geolocalización para un array RGB de radar.
+    Método LEGADO (antes del 15/10/2026). Solo se usa para tamaños de imagen
+    sin variante calibrada; el resultado sale marcado "legado_sin_calibrar".
+
+    Limitaciones conocidas (informe GEO_ROBUSTO): máscara sin distinguir
+    intensidad, búsqueda en casi todo el ancho, sin validación entre templates
+    y escala copiada del template ganador (error de hasta ~37 km en bordes).
 
     Pasos:
     1. Extraer máscara de forma del array RGB (para template matching).
@@ -892,7 +908,14 @@ def geolocalizar(
                 int(np.count_nonzero(export_dbz)), int(np.count_nonzero(export_dbz == 0)))
 
     # ── 7. GeoTIFF final en memoria (1 banda dBZ uint8 + Color Table) ────────
-    geotiff_bytes = dbz_array_to_geotiff_bytes(export_dbz, corrected_transform, ref_crs)
+    etiquetas = {
+        "GEO_METODO": "legado",
+        "GEO_VARIANTE": "ninguna",
+        "GEO_ESTADO": "legado_sin_calibrar",
+        "GEO_TEMPLATE": str(best["template"]),
+    }
+    geotiff_bytes = dbz_array_to_geotiff_bytes(export_dbz, corrected_transform, ref_crs,
+                                               etiquetas_geo=etiquetas)
     logger.info("GeoTIFF exportado: %d bytes (1 banda dBZ uint8 + Color Table, NoData=0)", len(geotiff_bytes))
 
     return GeoResultado(
@@ -904,4 +927,427 @@ def geolocalizar(
         delta_lat=delta_lat,
         clutter_mask=clutter_mask,
         dbz_array=export_dbz,
+        estado_geo="legado_sin_calibrar",
+        umbral_dbz=10,
+    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Geolocalización robusta (desde 15/10/2026) — ver informe GEO_ROBUSTO
+# ══════════════════════════════════════════════════════════════════════════════
+
+NOMBRE_GEOMETRIAS = "geometrias_gif.json"
+NOMBRES_TEMPLATES_ECO = ("template_eco_fijo.tif", "template_eco_fijo2.tif")
+
+VERSION_GEO = "geo_robusto_v1"
+UMBRAL_DBZ_MATCH: int = 35        # clutter fuerte; deja afuera la lluvia estratiforme
+UMBRAL_DBZ_RESPALDO: int = 10     # si la forma fuerte del template no alcanza
+MIN_PX_MASCARA: int = 150         # por debajo, la forma no es reconocible
+VENTANA_PX: int = 25              # ~18 km; cubre de sobra el jitter de recorte
+TOL_TEMPLATES_PX: float = 4.0     # σ de cada template en 45 frames intactos <= 2,7 px
+RUIDO_PX: float = 3.0             # corrimiento menor = ruido del matching
+SCORE_MIN: float = 0.10           # el eco es ralo: mediana del score ~0,2
+TOL_COLOR_TEMPLATE: float = 30.0  # distancia RGB máx. para asignar dBZ al template
+CRS_SALIDA: str | None = "EPSG:3857"  # D1 pendiente: None = AEQD nativo, sin remuestreo
+
+
+# ── Capa 0: geometría calibrada por variante ──────────────────────────────────
+
+@dataclass(frozen=True)
+class Geometria:
+    """Geometría de una variante de GIF (un tamaño de recorte de crop_imagen).
+
+    pixel_m     tamaño de píxel sobre el terreno (m), cuadrado.
+    c0, r0      columna/fila (centro de píxel) del 0 km = el radar.
+    lat0, lon0  centro de la proyección AEQD.
+    ecos        esquina sup. izq. (col, fila) de cada template en esta variante,
+                en PÍXELES. Su georreferencia propia ya no se usa.
+    """
+    nombre: str
+    ancho: int
+    alto: int
+    pixel_m: float
+    c0: float
+    r0: float
+    lat0: float
+    lon0: float
+    ecos: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    @property
+    def crs(self) -> CRS:
+        return CRS.from_proj4(
+            f"+proj=aeqd +lat_0={self.lat0} +lon_0={self.lon0} "
+            "+datum=WGS84 +units=m +no_defs"
+        )
+
+    def transform(self, dc: float = 0.0, dr: float = 0.0) -> Affine:
+        """Affine de la imagen, corrida (dc, dr) px respecto de la variante.
+
+        x(c) = x0 + s·c ; y(r) = y0 − s·r, con x0 = −(c0+½)s, y0 = (r0+½)s.
+        El ½ aparece porque el transform apunta a la ESQUINA del píxel y los
+        rótulos de los ejes marcan su CENTRO.
+        Si los ecos aparecen corridos (dc, dr): x0' = x0 − dc·s ; y0' = y0 + dr·s.
+        """
+        s = self.pixel_m
+        x0 = -(self.c0 + 0.5) * s - dc * s
+        y0 = (self.r0 + 0.5) * s + dr * s
+        return Affine(s, 0.0, x0, 0.0, -s, y0)
+
+
+def cargar_geometrias(ruta: Path | str | None = None) -> dict[str, Geometria]:
+    """Lee templates/geometrias_gif.json → {nombre: Geometria}. {} si no existe."""
+    ruta = Path(ruta) if ruta is not None else Path(settings.template_dir) / NOMBRE_GEOMETRIAS
+    if not ruta.exists():
+        logger.warning("No existe %s: todas las imágenes irán por el método legado", ruta)
+        return {}
+    datos = json.loads(ruta.read_text(encoding="utf-8"))
+    geos: dict[str, Geometria] = {}
+    for nombre, g in datos["variantes"].items():
+        geos[nombre] = Geometria(
+            nombre=nombre,
+            ancho=int(g["ancho"]),
+            alto=int(g["alto"]),
+            pixel_m=float(g["pixel_m"]),
+            c0=float(g["cero_km_px"][0]),
+            r0=float(g["cero_km_px"][1]),
+            lat0=float(g["centro_aeqd"]["lat"]),
+            lon0=float(g["centro_aeqd"]["lon"]),
+            ecos={k: (int(v[0]), int(v[1])) for k, v in g["ecos_px"].items()},
+        )
+    return geos
+
+
+def elegir_geometria(shape: tuple[int, ...], geometrias: dict[str, Geometria]) -> Geometria | None:
+    """Variante cuyo tamaño coincide EXACTO con la imagen; None si no hay.
+
+    Exacto a propósito: otro tamaño es otro recorte y su geometría no aplica.
+    Mejor marcar la imagen que georreferenciarla mal.
+    """
+    alto, ancho = shape[:2]
+    for g in geometrias.values():
+        if g.ancho == ancho and g.alto == alto:
+            return g
+    return None
+
+
+# ── Capa 1: máscaras en dBZ (solo ecos fuertes) ───────────────────────────────
+
+def mascara_dbz(dbz: np.ndarray, umbral: int) -> np.ndarray:
+    """uint8 0/255 con los píxeles >= umbral dBZ."""
+    return ((dbz >= umbral).astype(np.uint8)) * 255
+
+
+def template_a_dbz(rgb: np.ndarray, tol: float = TOL_COLOR_TEMPLATE) -> np.ndarray:
+    """RGB de un template → dBZ por color más cercano de DBZ_COLOR_MAP.
+
+    Los templates son recortes de GIFs reales: el antialiasing que queda lejos
+    de todo color de la paleta (> tol) se descarta (0).
+    """
+    rgb = rgb[:, :, :3].astype(np.float32)
+    niveles = np.array(list(DBZ_COLOR_MAP.keys()), dtype=np.int32)
+    colores = np.array(list(DBZ_COLOR_MAP.values()), dtype=np.float32)
+    dist = np.linalg.norm(rgb[:, :, None, :] - colores[None, None, :, :], axis=3)
+    idx = dist.argmin(axis=2)
+    cerca = dist.min(axis=2) <= tol
+    no_negro = rgb.max(axis=2) > 10
+    return np.where(cerca & no_negro, niveles[idx], 0).astype(np.uint8)
+
+
+def elegir_umbral(dbz_template: np.ndarray) -> int:
+    """35 dBZ si la forma fuerte del template es reconocible; si no, 10."""
+    if int(np.count_nonzero(dbz_template >= UMBRAL_DBZ_MATCH)) >= MIN_PX_MASCARA:
+        return UMBRAL_DBZ_MATCH
+    return UMBRAL_DBZ_RESPALDO
+
+
+@dataclass
+class TemplateEco:
+    nombre: str
+    dbz: np.ndarray        # (h, w) uint8, dBZ del template
+    umbral: int            # 35 o 10
+    mascara: np.ndarray    # (h, w) uint8 0/255 a ese umbral
+    forma: np.ndarray      # (h, w) bool, forma completa (para borrar el clutter)
+
+
+def cargar_templates(dir_templates: Path | str | None = None) -> list[TemplateEco]:
+    """Lee los templates de eco fijo en su resolución NATIVA (sin reescalar).
+
+    Su georreferencia se ignora: lo que estaba mal era la etiqueta geográfica,
+    no la forma. La posición la da la variante, en píxeles.
+    """
+    dir_templates = Path(dir_templates) if dir_templates is not None else Path(settings.template_dir)
+    templates: list[TemplateEco] = []
+    for nombre in NOMBRES_TEMPLATES_ECO:
+        ruta = dir_templates / nombre
+        if not ruta.exists():
+            continue
+        with rasterio.open(ruta) as src:
+            rgb = np.moveaxis(src.read(), 0, -1)
+        dbz = template_a_dbz(rgb)
+        umbral = elegir_umbral(dbz)
+        templates.append(TemplateEco(nombre=nombre, dbz=dbz, umbral=umbral,
+                                     mascara=mascara_dbz(dbz, umbral), forma=dbz > 0))
+    if not templates:
+        raise FileNotFoundError(f"No hay templates de eco fijo en {dir_templates}")
+    return templates
+
+
+@lru_cache(maxsize=4)
+def _geometrias_cache(template_dir: str) -> dict[str, Geometria]:
+    """Geometrías calibradas, leídas una vez por proceso."""
+    return cargar_geometrias(Path(template_dir) / NOMBRE_GEOMETRIAS)
+
+
+@lru_cache(maxsize=4)
+def _templates_cache(template_dir: str) -> tuple[TemplateEco, ...]:
+    """Templates de eco fijo en dBZ, leídos una vez por proceso."""
+    return tuple(cargar_templates(template_dir))
+
+
+# ── Capa 2: búsqueda en ventana ───────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Match:
+    col: int
+    row: int
+    score: float
+
+    def corrimiento(self, esperado: tuple[int, int]) -> tuple[int, int]:
+        return self.col - esperado[0], self.row - esperado[1]
+
+
+def _recorte_con_relleno(img: np.ndarray, r0: int, c0: int, alto: int, ancho: int) -> np.ndarray:
+    """img[r0:r0+alto, c0:c0+ancho] rellenando con 0 lo que cae afuera."""
+    out = np.zeros((alto, ancho), dtype=img.dtype)
+    ih, iw = img.shape[:2]
+    rr0, cc0 = max(r0, 0), max(c0, 0)
+    rr1, cc1 = min(r0 + alto, ih), min(c0 + ancho, iw)
+    if rr1 > rr0 and cc1 > cc0:
+        out[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0] = img[rr0:rr1, cc0:cc1]
+    return out
+
+
+def buscar_en_ventana(
+    mascara_img: np.ndarray,
+    mascara_tmpl: np.ndarray,
+    esperado: tuple[int, int],
+    ventana: int = VENTANA_PX,
+) -> Match | None:
+    """Template matching SOLO a ±ventana px de la posición esperada (col, fila).
+
+    Un señuelo a 150 km (la lluvia de San Rafael del 13/10) no puede ganar
+    porque ni siquiera se mira. Score: TM_CCOEFF_NORMED sobre máscaras binarias.
+    None si no hay nada que comparar.
+    """
+    h, w = mascara_tmpl.shape
+    col_e, row_e = esperado
+    region = _recorte_con_relleno(mascara_img, row_e - ventana, col_e - ventana,
+                                  h + 2 * ventana, w + 2 * ventana)
+    if not region.any() or not mascara_tmpl.any():
+        return None
+    res = cv2.matchTemplate(region.astype(np.float32), mascara_tmpl.astype(np.float32),
+                            cv2.TM_CCOEFF_NORMED)
+    res[~np.isfinite(res)] = -1.0
+    _, score, _, (cx, cy) = cv2.minMaxLoc(res)
+    return Match(col=col_e - ventana + cx, row=row_e - ventana + cy, score=float(score))
+
+
+# ── Capa 4: dos templates como testigos ───────────────────────────────────────
+
+def combinar_corrimientos(
+    corrimientos: list[tuple[tuple[int, int], float] | None],
+    tol: float = TOL_TEMPLATES_PX,
+    score_min: float = SCORE_MIN,
+) -> tuple[str, tuple[float, float]]:
+    """Combina los corrimientos [((dc, dr), score) | None] de cada template.
+
+      "consistente"    dos testigos válidos que coinciden a ±tol → promedio
+      "inconsistente"  dos testigos válidos que no coinciden     → (0, 0)
+      "un_template"    un solo testigo válido                    → el suyo
+      "sin_match"      ninguno                                   → (0, 0)
+    """
+    validos = [c for c in corrimientos if c is not None and c[1] >= score_min]
+    if not validos:
+        return "sin_match", (0.0, 0.0)
+    if len(validos) == 1:
+        (dc, dr), _ = validos[0]
+        return "un_template", (float(dc), float(dr))
+    (dc1, dr1), _ = validos[0]
+    (dc2, dr2), _ = validos[1]
+    if abs(dc1 - dc2) <= tol and abs(dr1 - dr2) <= tol:
+        return "consistente", ((dc1 + dc2) / 2.0, (dr1 + dr2) / 2.0)
+    return "inconsistente", (0.0, 0.0)
+
+
+# ── Capas 3+5: nominal salvo dos testigos ─────────────────────────────────────
+
+def decidir_corrimiento(
+    estado: str,
+    corrimiento: tuple[float, float],
+    ruido: float = RUIDO_PX,
+) -> tuple[str, tuple[float, float]]:
+    """Mueve la imagen SOLO con dos testigos consistentes y más allá del ruido.
+
+    Reemplaza a la capa 5 (historial temporal): con la geometría calibrada el
+    corrimiento esperado del scheduler es (0, 0), y el banco no es una serie
+    temporal. Ante la duda, geometría nominal (KISS, sin estado persistente).
+    """
+    if estado == "consistente" and math.hypot(*corrimiento) > ruido:
+        return "corregido", corrimiento
+    return f"nominal_{estado}", (0.0, 0.0)
+
+
+def estimar_corrimiento(
+    dbz_map: np.ndarray,
+    templates: list[TemplateEco] | tuple[TemplateEco, ...],
+    geometria: Geometria,
+) -> tuple[str, tuple[float, float], float, int]:
+    """Capas 1→2→4→3+5. Devuelve (estado_geo, corrimiento, score, umbral)."""
+    testigos: list[tuple[tuple[int, int], float] | None] = []
+    scores: list[float] = []
+    umbral_usado = UMBRAL_DBZ_MATCH
+    for t in templates:
+        if t.nombre not in geometria.ecos:
+            testigos.append(None)
+            continue
+        esperado = geometria.ecos[t.nombre]
+        umbral_usado = min(umbral_usado, t.umbral)
+        m = buscar_en_ventana(mascara_dbz(dbz_map, t.umbral), t.mascara, esperado)
+        if m is None:
+            testigos.append(None)
+            continue
+        testigos.append((m.corrimiento(esperado), m.score))
+        scores.append(m.score)
+        logger.info("  [%s] match (%d,%d) score=%.3f corrimiento=%s",
+                    t.nombre, m.col, m.row, m.score, m.corrimiento(esperado))
+    estado, corr = combinar_corrimientos(testigos)
+    estado_geo, corr_final = decidir_corrimiento(estado, corr)
+    return estado_geo, corr_final, (max(scores) if scores else 0.0), umbral_usado
+
+
+# ── Clutter en posición real y reproyección ───────────────────────────────────
+
+def _pegar_forma(shape: tuple[int, int], forma: np.ndarray, r0: int, c0: int) -> np.ndarray:
+    """Pega `forma` (h, w) en un lienzo bool `shape` con esquina en (r0, c0)."""
+    h, w = forma.shape
+    lienzo = np.zeros(shape, dtype=bool)
+    ih, iw = shape
+    rr0, cc0 = max(r0, 0), max(c0, 0)
+    rr1, cc1 = min(r0 + h, ih), min(c0 + w, iw)
+    if rr1 > rr0 and cc1 > cc0:
+        lienzo[rr0:rr1, cc0:cc1] = forma[rr0 - r0:rr1 - r0, cc0 - c0:cc1 - c0]
+    return lienzo
+
+
+def mascara_clutter(
+    shape: tuple[int, ...],
+    templates: list[TemplateEco] | tuple[TemplateEco, ...],
+    geometria: Geometria,
+    corrimiento: tuple[float, float],
+) -> np.ndarray:
+    """bool (H, W): forma de los templates en su posición REAL
+    (nominal de la variante + corrimiento final), NO donde cayó el match.
+    Así, si el match se engaña, no se borra lluvia real.
+    """
+    mask = np.zeros(shape[:2], dtype=bool)
+    dc, dr = int(round(corrimiento[0])), int(round(corrimiento[1]))
+    for t in templates:
+        if t.nombre in geometria.ecos:
+            col, row = geometria.ecos[t.nombre]
+            mask |= _pegar_forma(shape[:2], t.forma, row + dr, col + dc)
+    return mask
+
+
+def reproyectar(
+    dbz: np.ndarray,
+    transform: Affine,
+    crs_origen: CRS,
+    crs_salida: str | None = CRS_SALIDA,
+) -> tuple[np.ndarray, Affine, CRS]:
+    """AEQD → crs_salida por VECINO MÁS CERCANO.
+
+    Los dBZ son categorías: un bilineal inventaría niveles que la paleta no
+    tiene. Con crs_salida=None se devuelve el raster nativo (AEQD).
+    """
+    if crs_salida is None:
+        return dbz, transform, crs_origen
+    alto, ancho = dbz.shape
+    destino = CRS.from_user_input(crs_salida)
+    izq, arr = transform * (0, 0)
+    der, aba = transform * (ancho, alto)
+    t_out, w_out, h_out = calculate_default_transform(
+        crs_origen, destino, ancho, alto, left=izq, bottom=aba, right=der, top=arr)
+    out = np.zeros((h_out, w_out), dtype=np.uint8)
+    reproject(source=dbz, destination=out,
+              src_transform=transform, src_crs=crs_origen,
+              dst_transform=t_out, dst_crs=destino,
+              resampling=Resampling.nearest, src_nodata=0, dst_nodata=0)
+    return out, t_out, destino
+
+
+# ── API pública ───────────────────────────────────────────────────────────────
+
+def geolocalizar(
+    filled_rgb: np.ndarray,
+    dbz_map: np.ndarray,
+    *,
+    geometrias: dict[str, Geometria] | None = None,
+    templates: list[TemplateEco] | None = None,
+    crs_salida: str | None = CRS_SALIDA,
+) -> GeoResultado:
+    """Pipeline de geolocalización (Fase 6).
+
+    1. Elegir la variante calibrada por tamaño exacto. Si no hay → legado marcado.
+    2. Estimar el corrimiento con los dos templates (ventana, >=35 dBZ, testigos).
+    3. Borrar el clutter en su posición real y aplicar los filtros de siempre.
+    4. Transform AEQD de la variante (+ corrimiento) y reproyectar a crs_salida.
+    5. GeoTIFF 1 banda dBZ + Color Table + etiquetas GEO_*.
+
+    Args:
+        filled_rgb: (H, W, 3) uint8, imagen post-relleno (para la marca de agua).
+        dbz_map: (H, W) int, dBZ de cada píxel (0 = sin eco).
+        geometrias, templates: inyectables para tests; por defecto se leen de
+            settings.template_dir (una sola vez por proceso).
+        crs_salida: "EPSG:3857" (default) o None para AEQD nativo.
+    """
+    if geometrias is None:
+        geometrias = _geometrias_cache(str(settings.template_dir))
+    geometria = elegir_geometria(dbz_map.shape, geometrias)
+    if geometria is None:
+        logger.warning("Geo: tamaño %s sin variante calibrada → legado_sin_calibrar",
+                       dbz_map.shape[:2])
+        return _geolocalizar_legado(filled_rgb, dbz_map)
+
+    if templates is None:
+        templates = list(_templates_cache(str(settings.template_dir)))
+
+    estado_geo, corr, score, umbral = estimar_corrimiento(dbz_map, templates, geometria)
+    logger.info("Geo robusta: variante=%s estado=%s corrimiento=%s score=%.3f",
+                geometria.nombre, estado_geo, corr, score)
+
+    clutter = mascara_clutter(dbz_map.shape, templates, geometria, corr)
+    export = _apply_dbz_filters(dbz_map, filled_rgb, clutter)
+
+    dbz_out, t_out, crs_out = reproyectar(export, geometria.transform(*corr),
+                                          geometria.crs, crs_salida)
+    etiquetas = {
+        "GEO_METODO": VERSION_GEO,
+        "GEO_VARIANTE": geometria.nombre,
+        "GEO_ESTADO": estado_geo,
+        "GEO_CORRIMIENTO_PX": f"{corr[0]:+.1f},{corr[1]:+.1f}",
+        "GEO_UMBRAL_DBZ": str(umbral),
+        "GEO_CRS_NATIVO": geometria.crs.to_proj4(),
+    }
+    return GeoResultado(
+        geotiff_bytes=dbz_array_to_geotiff_bytes(dbz_out, t_out, crs_out, etiquetas_geo=etiquetas),
+        transform_affine=str(t_out),
+        crs_str=str(crs_out),
+        score_match=score,
+        delta_lon=0.0,
+        delta_lat=0.0,
+        clutter_mask=clutter,      # grilla de ENTRADA (la usa _calcular_metricas)
+        dbz_array=dbz_out,         # grilla de SALIDA (la del GeoTIFF)
+        estado_geo=estado_geo,
+        corrimiento_px=corr,
+        variante=geometria.nombre,
+        umbral_dbz=umbral,
     )

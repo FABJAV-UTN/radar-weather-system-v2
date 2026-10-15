@@ -54,7 +54,7 @@ src/
     ├── crop.py           # Fase 3: recorte del marco
     ├── limpiar.py        # Fase 4: limpieza y clasificación dBZ
     ├── rellenar.py       # Fase 5: relleno de huecos (watermark)
-    ├── geolocalizar.py   # Fase 6: georreferenciación con template matching
+    ├── geolocalizar.py   # Fase 6: georreferenciación (geometría calibrada + eco fijo como registro)
     ├── ocr.py            # Extracción de timestamp via OCR (Tesseract)
     └── scheduler.py      # Procesamiento continuo automático (loop async)
 ```
@@ -117,10 +117,14 @@ Fase 4: limpiar.py
 Fase 5: rellenar.py
   └─► Rellena los huecos de la máscara (watermark) por interpolación
 
-Fase 6: geolocalizar.py
-  └─► Template matching del eco fijo contra template_eco_fijo.tif
-  └─► Corrige el Affine Transform según la posición del eco
-  └─► Escribe el GeoTIFF final en un buffer BytesIO (LZW comprimido)
+Fase 6: geolocalizar.py  (rediseñada el 15/10/2026, ver informe GEO_ROBUSTO)
+  └─► Elige la geometría calibrada por tamaño exacto (templates/geometrias_gif.json):
+      grilla AEQD centrada en el radar, 722,54 m/px
+  └─► Mide el corrimiento con los dos templates de eco fijo: solo dBZ >= 35,
+      ventana de ±25 px, y mueve la imagen solo si los dos coinciden (y > 3 px)
+  └─► Borra el clutter en su posición real y reproyecta a EPSG:3857 (vecino más cercano)
+  └─► GeoTIFF en BytesIO (LZW) con etiquetas GEO_* (método, variante, estado, corrimiento)
+  └─► Tamaño sin variante calibrada → método legado, marcado "legado_sin_calibrar"
   └─► Devuelve clutter_mask para excluir ecos fijos del cálculo de dBZ máximo
 
 Fase 7: Persistencia
@@ -212,7 +216,7 @@ Usuario hace click "Procesar URL"
     → (si tiene marco) crop: recorta el marco
     → limpiar: elimina colores no-dBZ, clasifica 16 niveles
     → rellenar: interpola píxeles del watermark
-    → geolocalizar: template matching → GeoTIFF final
+    → geolocalizar: geometría calibrada + corrimiento validado → GeoTIFF final
     → DB: actualiza ImagenRadar (estado "completado", bytes del GeoTIFF)
     → DB: guarda MetricaProcesamiento (dbz_max, píxeles, etc.)
   → Backend: devuelve PipelineResponse al frontend
@@ -233,7 +237,12 @@ Hay dos carpetas de scripts a propósito:
 Scripts actuales:
 
 - `src/scripts/reset_admin.py`: resetea o crea el usuario admin.
+- `src/scripts/limpiar_intentos.py`: mantenimiento de la auditoría de descargas. Vacía los GIF rechazados guardados en `intentos_descarga.archivo` con más de N días (default 30); la fila de auditoría queda. Simula por defecto; `--aplicar`.
 - `scripts/f0_inventario.py`: inventario de eventos, huecos y deriva de georreferenciación (F0 del Subsistema 2). Deja CSV en `salidas_f0/`.
+- `scripts/calibrar_geometria_gif.py`: calibra la geometría de una variante nueva de GIF (otro tamaño de recorte) con el límite de Mendoza de Natural Earth y la agrega a `templates/geometrias_gif.json`. Se corre una vez por variante.
+- `scripts/reprocesar_geo.py`: rehace las fases 4→6 de imágenes ya guardadas con el `geolocalizar` actual (GeoTIFF, transform, crs, score y dbz_max). Simula por defecto; escribe con `--aplicar`; `--exportar DIR` deja los TIF.
+- `scripts/exportar_originales.py`: exporta el `raw_data` (GIF original) de un rango de ids.
+- `scripts/exportar_rechazados.py`: exporta los GIF de intentos de descarga rechazados (incompletos u OCR) para diagnosticarlos.
 
 Los scripts de `scripts/` se conectan a `localhost:5432` con los valores de `docker-compose.yml` si no hay `.env`. Antes de correrlos: `docker compose up db -d`.
 

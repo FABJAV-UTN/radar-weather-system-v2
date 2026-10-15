@@ -1,0 +1,36 @@
+{
+  "_doc": "Geometría calibrada por variante de GIF del DACC. La lee src/subsistema1/geolocalizar.py desde TEMPLATE_DIR. Se agrega/actualiza con scripts/calibrar_geometria_gif.py (una vez por variante). Ver informe_geo_robusto.tex.",
+  "_unidades": "pixel_m en metros sobre el terreno; cero_km_px y ecos_px en (columna, fila) de la imagen recortada por crop_imagen; ecos_px es la esquina sup. izq. del template.",
+  "variantes": {
+    "dacc_scheduler_560x741": {
+      "ancho": 560,
+      "alto": 741,
+      "pixel_m": 722.54,
+      "cero_km_px": [
+        204.5,
+        342.9
+      ],
+      "centro_aeqd": {
+        "lat": -33.4917,
+        "lon": -69.0217
+      },
+      "ecos_px": {
+        "template_eco_fijo.tif": [
+          77,
+          218
+        ],
+        "template_eco_fijo2.tif": [
+          71,
+          214
+        ]
+      },
+      "calibracion": {
+        "fecha": "2026-10-14",
+        "fuente": "GIF 18:48 UTC del 13/10/2026 (captura 1:1)",
+        "ejes": "69,2 px / 50 km (inferior), 69,3 px / 50 km (derecho)",
+        "limite_mendoza": "Natural Earth 10m admin1, chamfer: costo 2,73 px, mediana 1,37 px, p90 6,9 px",
+        "ecos": "mediana de matching en ventana sobre los 45 frames con eco intacto (707-754)"
+      }
+    }
+  }
+}

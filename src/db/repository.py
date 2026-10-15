@@ -372,8 +372,15 @@ class IntentoDescargaRepository:
         url: str,
         exitoso: bool,
         motivo_fallo: str | None = None,
+        fecha_intento: datetime | None = None,
+        archivo: bytes | None = None,
     ) -> IntentoDescarga:
-        """Registra un intento de descarga desde la URL DACC."""
+        """Registra un intento de descarga desde la URL DACC.
+
+        fecha_intento: hora (UTC, naive) en que EMPEZÓ el intento. Si no se
+        pasa, la pone Postgres al insertar (server_default).
+        archivo: bytes de lo descargado, solo en intentos rechazados.
+        """
         # Contar intentos previos para esta URL
         count_result = await self._session.execute(
             select(func.count()).select_from(IntentoDescarga).where(IntentoDescarga.url == url)
@@ -383,9 +390,12 @@ class IntentoDescargaRepository:
         intento = IntentoDescarga(
             url=url,
             exitoso=exitoso,
-            motivo_fallo=motivo_fallo,
+            motivo_fallo=motivo_fallo[:100] if motivo_fallo else None,
             intento_numero=numero,
+            archivo=archivo,
         )
+        if fecha_intento is not None:
+            intento.fecha_intento = fecha_intento
         self._session.add(intento)
         await self._session.flush()
         return intento
