@@ -9,6 +9,7 @@ export function Layout({ children }) {
 
   const navItems = [
     { to: '/imagenes', label: 'Imágenes', icon: '📡' },
+    { to: '/carrusel', label: 'Carrusel', icon: '🎞️' },
     { to: '/procesamiento', label: 'Procesar', icon: '⚙️' },
     { to: '/procesamiento-lote', label: 'Lote', icon: '📁' },
     ...(isAdmin ? [{ to: '/configuracion', label: 'Config', icon: '🔧' }] : []),

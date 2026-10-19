@@ -51,7 +51,7 @@ from src.subsistema1.ingestor import (
     ingestar_local,
     ingestar_url,
 )
-from src.subsistema1.limpiar import clean_image
+from src.subsistema1.limpiar import classify_array, clean_image
 from src.subsistema1.ocr import extract_timestamp
 from src.subsistema1.rellenar import fill_gaps
 
@@ -426,6 +426,38 @@ async def ejecutar_pipeline_url(
                                  archivo=archivo_rechazado)
 
 
+async def reprocesar_imagen(imagen_id: int, session: AsyncSession) -> ResultadoPipeline:
+    """
+    Vuelve a correr las fases 2-7 sobre una imagen ya guardada, desde su raw_data.
+
+    Conserva id, fecha_hora, origen y raw_data; reemplaza GeoTIFF, imágenes
+    intermedias y métricas con el resultado del código actual. Sirve para
+    regenerar el histórico cuando cambia el pipeline (p. ej. la corrección del
+    export dBZ del 19/10/2026).
+
+    Raises:
+        ValueError: si la imagen no existe o no tiene raw_data.
+    """
+    img_repo = ImagenRadarRepository(session)
+    paso_repo = ProcesamentoPasoRepository(session)
+    metrica_repo = MetricaProcesamientoRepository(session)
+
+    imagen = await img_repo.obtener_por_id(imagen_id)
+    if imagen is None or not imagen.raw_data:
+        raise ValueError(f"Imagen id={imagen_id} inexistente o sin raw_data")
+
+    await metrica_repo.eliminar_por_imagen(imagen_id)
+    await img_repo.actualizar_estado(imagen_id, "procesando")
+    return await _ejecutar_fases_comunes(
+        imagen_id=imagen_id,
+        pil_image=Image.open(io.BytesIO(imagen.raw_data)),
+        raw_bytes=imagen.raw_data,
+        img_repo=img_repo,
+        paso_repo=paso_repo,
+        metrica_repo=metrica_repo,
+    )
+
+
 async def _ejecutar_fases_comunes(
     imagen_id: int,
     pil_image: Image.Image,
@@ -475,14 +507,18 @@ async def _ejecutar_fases_comunes(
         # ── Fase 5: Relleno ───────────────────────────────────────────────────
         filled_rgb = await asyncio.to_thread(fill_gaps, clean_rgb, gap_mask)
         filled_png_bytes = await asyncio.to_thread(_array_to_png_bytes, filled_rgb)
+        # El GeoTIFF se arma con el dBZ POST-relleno: el relleno solo copia
+        # colores de la escala, así que reclasificar da los mismos niveles más
+        # los huecos cubiertos (líneas de límites, rótulos, marca de agua).
+        dbz_relleno = await asyncio.to_thread(classify_array, filled_rgb)
         logger.info("[img=%d] Fase 5 — relleno ok", imagen_id)
         await paso_repo.registrar(imagen_id, "relleno")
         await _verificar_cancelacion(request)
 
         # ── Fase 6: Geolocalización ───────────────────────────────────────────
-        # IMPORTANTE: Ahora pasamos dbz_map para generar GeoTIFF con 1 banda dBZ.
+        # Se pasa el dBZ post-relleno para generar el GeoTIFF de 1 banda dBZ.
         # El GeoTIFF final tiene valores uint8: 0=NoData, 10-80=dBZ.
-        geo = await asyncio.to_thread(geolocalizar, filled_rgb, dbz_map)
+        geo = await asyncio.to_thread(geolocalizar, filled_rgb, dbz_relleno)
         metricas.geo = geo
         metricas.score_match = geo.score_match
         logger.info("[img=%d] Fase 6 — geo ok, estado=%s, variante=%s, corrimiento=%s, "

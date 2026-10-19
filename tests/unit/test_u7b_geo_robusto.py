@@ -210,7 +210,7 @@ def test_clutter_en_posicion_real_no_en_el_match(g, templates_sinteticos, eco_si
     dbz = _imagen_con_ecos(g, eco_sintetico, senuelo=True)
     estado, corr, _, _ = geo.estimar_corrimiento(dbz, templates_sinteticos, g)
     clutter = geo.mascara_clutter(dbz.shape, templates_sinteticos, g, corr)
-    out = geo._apply_dbz_filters(dbz, np.zeros((*dbz.shape, 3), np.uint8), clutter)
+    out = geo._apply_dbz_filters(dbz, clutter)
     # el eco fijo desapareció...
     for t in templates_sinteticos:
         col, row = g.ecos[t.nombre]

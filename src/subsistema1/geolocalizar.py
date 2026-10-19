@@ -79,16 +79,6 @@ DBZ_COLOR_MAP = {
     80: (211, 211, 211), # #D3D3D3
 }
 
-# Filtro dBZ < 35 (para exportación)
-DBZ_BELOW_35 = {k: v for k, v in DBZ_COLOR_MAP.items() if k < 35}
-DBZ_COLOR_TOLERANCE: float = 18
-
-# Filtro marca de agua / verde
-WATERMARK_GREEN_MIN: int = 50
-WATERMARK_GREEN_MAX: int = 140
-WATERMARK_DOMINANCE: int = 15
-
-
 # ── Color Table para GeoTIFF ─────────────────────────────────────────────────
 
 def _build_color_table() -> dict:
@@ -152,39 +142,6 @@ def extract_shape_mask(arr: np.ndarray, threshold: int = 10) -> np.ndarray:
     if arr.shape[2] == 4:
         return (arr[:, :, 3] > threshold).astype(np.uint8) * 255
     return (np.any(arr[:, :, :3] > threshold, axis=2)).astype(np.uint8) * 255
-
-
-# ── Filtros de salida ─────────────────────────────────────────────────────────
-
-def build_dbz_below35_mask(arr: np.ndarray) -> np.ndarray:
-    """
-    Devuelve máscara booleana de píxeles con color correspondiente a dBZ < 35.
-    Estos son ecos débiles que no representan precipitación significativa.
-    """
-    rgb = arr[:, :, :3].astype(np.float32)
-    mask = np.zeros(arr.shape[:2], dtype=bool)
-    for _, (r, g, b) in DBZ_BELOW_35.items():
-        dist = np.linalg.norm(rgb - np.array([r, g, b], dtype=np.float32), axis=2)
-        mask |= dist <= DBZ_COLOR_TOLERANCE
-    logger.debug("  Filtro DBZ<35: %d píxeles", int(np.count_nonzero(mask)))
-    return mask
-
-
-def build_watermark_mask(arr: np.ndarray) -> np.ndarray:
-    """
-    Devuelve máscara booleana de píxeles verdes que corresponden a la marca
-    de agua / precipitación débil umbralada (verde dominante en rango fijo).
-    """
-    rgb = arr[:, :, :3].astype(np.int16)
-    r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
-    mask = (
-        (g > r + WATERMARK_DOMINANCE) &
-        (g > b + WATERMARK_DOMINANCE) &
-        (g >= WATERMARK_GREEN_MIN) &
-        (g <= WATERMARK_GREEN_MAX)
-    )
-    logger.debug("  Filtro marca de agua: %d píxeles", int(np.count_nonzero(mask)))
-    return mask
 
 
 # ── Verificación de forma (IoU + Correlación) ────────────────────────────────
@@ -635,20 +592,21 @@ def dbz_array_to_geotiff_bytes(
 
 def _apply_dbz_filters(
     dbz_map: np.ndarray,
-    filled_rgb: np.ndarray,
     clutter_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     Aplica filtros al mapa dBZ antes de exportar.
 
     Filtros:
-    1. Eco fijo (clutter_mask): poner a 0 (NoData).
+    1. Eco fijo (clutter_mask): poner a 0 (NoData) los píxeles >= 35 dBZ.
     2. dBZ < 10: valores fuera de rango de reflectividad válida (10-80 dBZ) → 0.
-    3. Watermark verde: marca de agua / umbral de precipitación débil → 0.
+
+    La marca de agua NO se filtra acá: la fase 4 (limpiar) ya restaura sus
+    colores y la fase 5 (rellenar) cubre los residuos. Un filtro por color
+    verde borraría la precipitación real de 20 y 30 dBZ.
 
     Args:
-        dbz_map: Array (H, W) int32 con valores dBZ originales.
-        filled_rgb: Array (H, W, 3) uint8. Imagen RGB post-relleno (para detectar watermark).
+        dbz_map: Array (H, W) int32 con valores dBZ (post-relleno).
         clutter_mask: Array booleana (H, W). True donde hay ecos fijos.
 
     Returns:
@@ -670,12 +628,6 @@ def _apply_dbz_filters(
     below_10_mask = (export_dbz > 0) & (export_dbz < 10)
     export_dbz[below_10_mask] = 0
     logger.info("  Filtro dBZ<10: %d px → 0", int(np.count_nonzero(below_10_mask)))
-
-    # 3. Verdes de marca de agua / umbral de precipitación débil
-    # Detectar en el RGB original (más confiable que en dBZ)
-    watermark_mask = build_watermark_mask(filled_rgb)
-    export_dbz[watermark_mask] = 0
-    logger.info("  Filtro watermark: %d px → 0", int(np.count_nonzero(watermark_mask)))
 
     return export_dbz
 
@@ -894,7 +846,7 @@ def _geolocalizar_legado(
                 int(np.count_nonzero(clutter_mask)))
 
     # ── 6. Aplicar filtros al dbz_map y convertir a uint8 ────────────────────
-    export_dbz = _apply_dbz_filters(dbz_map, filled_rgb, clutter_mask)
+    export_dbz = _apply_dbz_filters(dbz_map, clutter_mask)
 
     # Verificar que solo tenemos valores válidos
     unique_values = set(np.unique(export_dbz))
@@ -1303,8 +1255,9 @@ def geolocalizar(
     5. GeoTIFF 1 banda dBZ + Color Table + etiquetas GEO_*.
 
     Args:
-        filled_rgb: (H, W, 3) uint8, imagen post-relleno (para la marca de agua).
-        dbz_map: (H, W) int, dBZ de cada píxel (0 = sin eco).
+        filled_rgb: (H, W, 3) uint8, imagen post-relleno. Solo la usa el
+            camino legado (máscara de forma para el matching en cascada).
+        dbz_map: (H, W) int, dBZ de cada píxel post-relleno (0 = sin eco).
         geometrias, templates: inyectables para tests; por defecto se leen de
             settings.template_dir (una sola vez por proceso).
         crs_salida: "EPSG:3857" (default) o None para AEQD nativo.
@@ -1325,7 +1278,7 @@ def geolocalizar(
                 geometria.nombre, estado_geo, corr, score)
 
     clutter = mascara_clutter(dbz_map.shape, templates, geometria, corr)
-    export = _apply_dbz_filters(dbz_map, filled_rgb, clutter)
+    export = _apply_dbz_filters(dbz_map, clutter)
 
     dbz_out, t_out, crs_out = reproyectar(export, geometria.transform(*corr),
                                           geometria.crs, crs_salida)

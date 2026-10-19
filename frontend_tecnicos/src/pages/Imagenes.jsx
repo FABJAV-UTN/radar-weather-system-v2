@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
+import { aInputLocal, haceHoras } from '../utils/fechas';
 
 // Rangos de dBZ — rangos contiguos e inclusivos (fix bug 1 anterior).
 const DBZ_NIVELES = [
@@ -30,15 +31,6 @@ function SortIcon({ col, sortCol, sortDir }) {
   return <span className="ml-1 text-celeste">{sortDir === 'asc' ? '↑' : '↓'}</span>;
 }
 
-function hoy() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function haceUnaSemana() {
-  const d = new Date();
-  d.setDate(d.getDate() - 7);
-  return d.toISOString().slice(0, 10);
-}
 
 export function Imagenes() {
   // ── Estado de datos ──────────────────────────────────────────────────────
@@ -60,8 +52,8 @@ export function Imagenes() {
 
   // ── Panel descarga lote ───────────────────────────────────────────────────
   const [mostrarLote, setMostrarLote]         = useState(false);
-  const [loteDesde, setLoteDesde]             = useState(haceUnaSemana);
-  const [loteHasta, setLoteHasta]             = useState(hoy);
+  const [loteDesde, setLoteDesde]             = useState(() => haceHoras(24 * 7));
+  const [loteHasta, setLoteHasta]             = useState(() => aInputLocal(new Date()));
   const [descargandoLote, setDescargandoLote] = useState(false);
   const [errorLote, setErrorLote]             = useState('');
 
@@ -246,13 +238,13 @@ export function Imagenes() {
       {mostrarLote && (
         <div className="card p-4 space-y-3 border border-celeste/30">
           <p className="text-sm font-semibold text-gray-700">
-            Descargar GeoTIFFs como ZIP por rango de fechas
+            Descargar GeoTIFFs como ZIP por rango de fecha y hora
           </p>
           <div className="flex flex-wrap gap-3 items-end">
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">Desde</label>
               <input
-                type="date"
+                type="datetime-local"
                 className="form-input"
                 value={loteDesde}
                 max={loteHasta}
@@ -262,7 +254,7 @@ export function Imagenes() {
             <div className="flex flex-col gap-1">
               <label className="text-xs text-gray-500">Hasta</label>
               <input
-                type="date"
+                type="datetime-local"
                 className="form-input"
                 value={loteHasta}
                 min={loteDesde}
@@ -281,7 +273,7 @@ export function Imagenes() {
             <p className="text-sm text-red-600">⚠️ {errorLote}</p>
           )}
           <p className="text-xs text-gray-400">
-            Solo se incluyen imágenes con estado <strong>completado</strong>.
+            Hora argentina. Solo se incluyen imágenes con estado <strong>completado</strong>.
           </p>
         </div>
       )}

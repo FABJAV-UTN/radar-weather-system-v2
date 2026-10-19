@@ -4,15 +4,17 @@ Router de imágenes: listado, detalle y descarga de GeoTIFF.
 
 Endpoints:
 - GET  /imagenes                              → Lista paginada con sort server-side
-- GET  /imagenes/descargar-lote?desde=&hasta= → ZIP con GeoTIFFs de un rango de fechas
+- GET  /imagenes/serie?desde=&hasta=          → Cuadros del carrusel (id + hora) de un rango
+- GET  /imagenes/descargar-lote?desde=&hasta= → ZIP con GeoTIFFs de un rango de fecha y hora
 - GET  /imagenes/{id}                         → Detalle de una imagen
 - GET  /imagenes/{id}/geotiff                 → Descarga del GeoTIFF final (1 banda dBZ)
+- GET  /imagenes/{id}/vista                   → PNG en gris con el dBZ de cada píxel (carrusel)
 """
 from __future__ import annotations
 
 import io
 import zipfile
-from datetime import date, datetime
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,8 +23,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies import get_current_user, get_db
-from src.api.schemas.imagen import ImagenDetalle, ImagenListaResponse, ImagenResumen
-from src.db.models import ImagenRadar, MetricaProcesamiento
+from src.api.schemas.imagen import (
+    FrameSerie,
+    ImagenDetalle,
+    ImagenListaResponse,
+    ImagenResumen,
+    SerieResponse,
+)
+from src.api.vista_dbz import geotiff_a_vista
+from src.db.models import MetricaProcesamiento
 from src.db.repository import ImagenRadarRepository
 
 router = APIRouter(prefix="/imagenes", tags=["imagenes"])
@@ -30,6 +39,17 @@ router = APIRouter(prefix="/imagenes", tags=["imagenes"])
 # Valores válidos de sort_by aceptados por el endpoint
 _SORT_BY_VALUES = Literal["id", "fecha", "origen", "estado", "dbz"]
 _SORT_DIR_VALUES = Literal["asc", "desc"]
+
+# Tope de cuadros por pedido del carrusel (~2,7 días del scheduler a 2 min).
+MAX_FRAMES_SERIE = 2000
+
+
+def _validar_rango(desde: datetime, hasta: datetime) -> None:
+    if hasta < desde:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="'hasta' es anterior a 'desde'.",
+        )
 
 
 # ── Listado paginado ───────────────────────────────────────────────────────────
@@ -104,10 +124,32 @@ async def listar_imagenes(
 # IMPORTANTE: esta ruta debe ir ANTES de /{imagen_id} para que FastAPI no
 # intente parsear "descargar-lote" como un int.
 
+@router.get("/serie", response_model=SerieResponse)
+async def serie_imagenes(
+    desde: datetime = Query(..., description="Inicio (AAAA-MM-DDTHH:MM, hora argentina, inclusive)"),
+    hasta: datetime = Query(..., description="Fin (AAAA-MM-DDTHH:MM, hora argentina, inclusive)"),
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+) -> SerieResponse:
+    """
+    Cuadros del carrusel: imágenes completadas del rango en orden cronológico.
+
+    Devuelve solo id y hora; cada cuadro se pide después con /{id}/vista.
+    Si el rango supera MAX_FRAMES_SERIE imágenes, se devuelven las primeras y
+    `truncada` es True.
+    """
+    _validar_rango(desde, hasta)
+    filas = await ImagenRadarRepository(db).listar_serie(desde, hasta, MAX_FRAMES_SERIE + 1)
+    return SerieResponse(
+        items=[FrameSerie(id=i, fecha_hora=f) for i, f in filas[:MAX_FRAMES_SERIE]],
+        truncada=len(filas) > MAX_FRAMES_SERIE,
+    )
+
+
 @router.get("/descargar-lote")
 async def descargar_lote(
-    desde: date = Query(..., description="Fecha de inicio (YYYY-MM-DD, inclusive)"),
-    hasta: date = Query(..., description="Fecha de fin (YYYY-MM-DD, inclusive)"),
+    desde: datetime = Query(..., description="Inicio (AAAA-MM-DDTHH:MM, hora argentina, inclusive)"),
+    hasta: datetime = Query(..., description="Fin (AAAA-MM-DDTHH:MM, hora argentina, inclusive)"),
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(get_current_user),
 ) -> StreamingResponse:
@@ -117,30 +159,23 @@ async def descargar_lote(
     El ZIP se arma en memoria; cada archivo se llama `radar_<id>_<fecha_hora>.tif`.
     Si no hay imágenes completadas en el rango, devuelve 404.
 
-    Nota: Los GeoTIFFs tienen 1 banda dBZ (uint8), NoData=0.
+    Nota: Los GeoTIFFs tienen 1 banda dBZ (uint8), NoData=0, completos (sin filtrar niveles).
     """
-    repo = ImagenRadarRepository(db)
-    imagenes = await repo.listar_por_rango(
-        desde=datetime(desde.year, desde.month, desde.day, 0, 0, 0),
-        hasta=datetime(hasta.year, hasta.month, hasta.day, 23, 59, 59),
-    )
-
-    completadas = [img for img in imagenes if img.estado == "completado" and img.geotiff_data]
-    if not completadas:
+    _validar_rango(desde, hasta)
+    geotiffs = await ImagenRadarRepository(db).listar_geotiffs_por_rango(desde, hasta)
+    if not geotiffs:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No hay imágenes completadas entre {desde} y {hasta}.",
+            detail=f"No hay imágenes completadas entre {desde:%Y-%m-%d %H:%M} y {hasta:%Y-%m-%d %H:%M}.",
         )
 
-    # Armar ZIP en memoria
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for img in completadas:
-            filename = f"radar_{img.id}_{img.fecha_hora.strftime('%Y%m%d_%H%M%S')}.tif"
-            zf.writestr(filename, img.geotiff_data)
+        for imagen_id, fecha_hora, geotiff_data in geotiffs:
+            zf.writestr(f"radar_{imagen_id}_{fecha_hora:%Y%m%d_%H%M%S}.tif", geotiff_data)
     zip_buffer.seek(0)
 
-    zip_filename = f"radar_{desde.strftime('%Y%m%d')}_{hasta.strftime('%Y%m%d')}.zip"
+    zip_filename = f"radar_{desde:%Y%m%d_%H%M}_{hasta:%Y%m%d_%H%M}.zip"
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
@@ -222,3 +257,44 @@ async def descargar_geotiff(
         media_type="image/tiff",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Vista para el carrusel ─────────────────────────────────────────────────────
+
+@router.get(
+    "/{imagen_id}/vista",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"image/png": {}},
+            "description": (
+                "PNG en gris (8 bits): el valor de cada píxel es el dBZ (0 = sin dato). "
+                "Header X-Limites: oeste,sur,este,norte en grados (para el mapa)."
+            ),
+        },
+        404: {"description": "Imagen no encontrada o GeoTIFF no disponible."},
+    },
+)
+async def vista_dbz(
+    imagen_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(get_current_user),
+) -> Response:
+    """
+    Banda dBZ del GeoTIFF como PNG sin pérdida, para que el frontend la
+    coloree con la paleta del radar. Los límites geográficos del cuadro van
+    en el header X-Limites, para apoyarlo sobre el mapa.
+    """
+    geotiff = await ImagenRadarRepository(db).obtener_geotiff(imagen_id)
+    if not geotiff:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="GeoTIFF no disponible para esta imagen.",
+        )
+    vista = geotiff_a_vista(geotiff)
+    # Sin caché HTTP: el contenido cambia si la imagen se reprocesa.
+    # El carrusel ya guarda los cuadros en memoria mientras está abierto.
+    headers = {"Cache-Control": "no-store"}
+    if vista.limites is not None:
+        headers["X-Limites"] = ",".join(str(v) for v in vista.limites)
+    return Response(content=vista.png, media_type="image/png", headers=headers)

@@ -3,6 +3,7 @@ import { useAuth } from './hooks/useAuth';
 import { Layout } from './components/Layout';
 import { Login } from './pages/Login';
 import { Imagenes } from './pages/Imagenes';
+import { Carrusel } from './pages/Carrusel';
 import { Procesamiento } from './pages/Procesamiento';
 import { ProcesamientoLote } from './pages/ProcesamientoLote';
 import { Configuracion } from './pages/Configuracion';
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
           <Route path="/imagenes" element={<ProtectedRoute><Imagenes /></ProtectedRoute>} />
+          <Route path="/carrusel" element={<ProtectedRoute><Carrusel /></ProtectedRoute>} />
           <Route path="/procesamiento" element={<ProtectedRoute><Procesamiento /></ProtectedRoute>} />
           <Route path="/procesamiento-lote" element={<ProtectedRoute><ProcesamientoLote /></ProtectedRoute>} />
           <Route path="/configuracion" element={<ProtectedRoute><Configuracion /></ProtectedRoute>} />

@@ -272,54 +272,41 @@ class TestDBZArrayToGeoTIFF:
 class TestApplyDBZFilters:
     """Tests para la función _apply_dbz_filters."""
 
-    def test_u7_apply_dbz_filters_preserva_10_20_30_dbz(self):
-        """U7: _apply_dbz_filters preserva reflectividades 10, 20 y 30 dBZ."""
+    def test_u7_apply_dbz_filters_preserva_escala_completa(self):
+        """U7: _apply_dbz_filters preserva 10, 20, 30 dBZ (verdes incluidos) y los fuertes."""
         dbz_map = np.zeros((10, 10), dtype=np.int32)
-        dbz_map[1, 1] = 10
-        dbz_map[2, 2] = 20
-        dbz_map[3, 3] = 30
-        dbz_map[4, 4] = 35
-        dbz_map[5, 5] = 54
+        for i, valor in enumerate((10, 20, 30, 35, 54), start=1):
+            dbz_map[i, i] = valor
 
-        filled_rgb = np.zeros((10, 10, 3), dtype=np.uint8)
+        resultado = _apply_dbz_filters(dbz_map)
 
-        resultado = _apply_dbz_filters(dbz_map, filled_rgb)
-
-        assert resultado[1, 1] == 10, f"10 dBZ fue alterado: {resultado[1, 1]}"
-        assert resultado[2, 2] == 20, f"20 dBZ fue alterado: {resultado[2, 2]}"
-        assert resultado[3, 3] == 30, f"30 dBZ fue alterado: {resultado[3, 3]}"
-        assert resultado[4, 4] == 35, f"35 dBZ fue alterado: {resultado[4, 4]}"
-        assert resultado[5, 5] == 54, f"54 dBZ fue alterado: {resultado[5, 5]}"
+        for i, valor in enumerate((10, 20, 30, 35, 54), start=1):
+            assert resultado[i, i] == valor, f"{valor} dBZ fue alterado: {resultado[i, i]}"
         assert resultado[0, 0] == 0, f"0 dBZ (NoData) debe ser 0: {resultado[0, 0]}"
 
     def test_u7_apply_dbz_filters_descarta_menores_a_10(self):
-        """U7: _apply_dbz_filters descarta valores < 10 dBZ pero no 10, 20 ni 30."""
+        """U7: _apply_dbz_filters descarta valores < 10 dBZ pero no 10."""
         dbz_map = np.zeros((5, 5), dtype=np.int32)
         dbz_map[0, 0] = 5   # Menor a 10 dBZ
         dbz_map[1, 1] = 10  # 10 dBZ válido
-        filled_rgb = np.zeros((5, 5, 3), dtype=np.uint8)
 
-        resultado = _apply_dbz_filters(dbz_map, filled_rgb)
+        resultado = _apply_dbz_filters(dbz_map)
 
         assert resultado[0, 0] == 0, f"Valores < 10 dBZ deben descartarse a 0: {resultado[0, 0]}"
         assert resultado[1, 1] == 10, f"10 dBZ debe conservarse: {resultado[1, 1]}"
 
-    def test_u7_apply_dbz_filters_filtra_clutter_y_watermark(self):
-        """U7: _apply_dbz_filters enmascara correctamente clutter_mask y marca de agua verde."""
+    def test_u7_apply_dbz_filters_borra_solo_clutter_fuerte(self):
+        """U7: bajo clutter_mask se borra lo >= 35 dBZ y se conserva lo débil."""
         dbz_map = np.full((10, 10), 45, dtype=np.int32)
-        filled_rgb = np.zeros((10, 10, 3), dtype=np.uint8)
-
-        # Píxel de watermark verde en (2, 2): g > r + 15, g > b + 15, 50 <= g <= 140
-        filled_rgb[2, 2] = [20, 100, 20]
-
-        # Eco fijo en clutter_mask en (3, 3)
+        dbz_map[4, 4] = 20
         clutter_mask = np.zeros((10, 10), dtype=bool)
         clutter_mask[3, 3] = True
+        clutter_mask[4, 4] = True
 
-        resultado = _apply_dbz_filters(dbz_map, filled_rgb, clutter_mask)
+        resultado = _apply_dbz_filters(dbz_map, clutter_mask)
 
-        assert resultado[2, 2] == 0, "Píxel de watermark no fue puesto a 0"
-        assert resultado[3, 3] == 0, "Píxel de clutter_mask no fue puesto a 0"
+        assert resultado[3, 3] == 0, "Clutter fuerte no fue puesto a 0"
+        assert resultado[4, 4] == 20, "Eco débil bajo el clutter fue borrado"
         assert resultado[5, 5] == 45, "Píxel válido fue alterado incorrectamente"
 
 

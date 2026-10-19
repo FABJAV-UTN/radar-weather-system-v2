@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.models import ImagenRadar, IntentoDescarga, MetricaProcesamiento, ProcesamentoPaso, Usuario, RolUsuario
@@ -197,6 +197,67 @@ class ImagenRadarRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def listar_ids_reprocesables(
+        self,
+        desde: datetime,
+        hasta: datetime,
+    ) -> list[tuple[int, datetime, str]]:
+        """
+        (id, fecha_hora, estado) de las imágenes del rango que conservan su
+        raw_data, ordenadas por fecha_hora. No carga los binarios.
+        """
+        stmt = (
+            select(ImagenRadar.id, ImagenRadar.fecha_hora, ImagenRadar.estado)
+            .where(ImagenRadar.fecha_hora >= desde)
+            .where(ImagenRadar.fecha_hora <= hasta)
+            .where(ImagenRadar.raw_data.is_not(None))
+            .order_by(ImagenRadar.fecha_hora.asc(), ImagenRadar.id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return [tuple(fila) for fila in result.all()]
+
+    async def listar_serie(
+        self,
+        desde: datetime,
+        hasta: datetime,
+        limite: int,
+    ) -> list[tuple[int, datetime]]:
+        """
+        (id, fecha_hora) de las imágenes completadas con GeoTIFF en el rango,
+        en orden cronológico. Pensado para el carrusel: no carga binarios.
+        """
+        stmt = (
+            select(ImagenRadar.id, ImagenRadar.fecha_hora)
+            .where(ImagenRadar.fecha_hora >= desde)
+            .where(ImagenRadar.fecha_hora <= hasta)
+            .where(ImagenRadar.estado == "completado")
+            .where(ImagenRadar.geotiff_data.is_not(None))
+            .order_by(ImagenRadar.fecha_hora.asc(), ImagenRadar.id.asc())
+            .limit(limite)
+        )
+        result = await self._session.execute(stmt)
+        return [tuple(fila) for fila in result.all()]
+
+    async def listar_geotiffs_por_rango(
+        self,
+        desde: datetime,
+        hasta: datetime,
+    ) -> list[tuple[int, datetime, bytes]]:
+        """
+        (id, fecha_hora, geotiff_data) de las imágenes completadas del rango.
+        Solo carga la columna del GeoTIFF (no raw/clean/filled/cropped).
+        """
+        stmt = (
+            select(ImagenRadar.id, ImagenRadar.fecha_hora, ImagenRadar.geotiff_data)
+            .where(ImagenRadar.fecha_hora >= desde)
+            .where(ImagenRadar.fecha_hora <= hasta)
+            .where(ImagenRadar.estado == "completado")
+            .where(ImagenRadar.geotiff_data.is_not(None))
+            .order_by(ImagenRadar.fecha_hora.asc(), ImagenRadar.id.asc())
+        )
+        result = await self._session.execute(stmt)
+        return [tuple(fila) for fila in result.all()]
+
     async def actualizar_estado(self, imagen_id: int, estado: str) -> None:
         """Cambia el estado de una imagen."""
         await self._session.execute(
@@ -348,6 +409,12 @@ class MetricaProcesamientoRepository:
         self._session.add(metrica)
         await self._session.flush()
         return metrica
+
+    async def eliminar_por_imagen(self, imagen_id: int) -> None:
+        """Borra las métricas de una imagen (antes de reprocesarla)."""
+        await self._session.execute(
+            delete(MetricaProcesamiento).where(MetricaProcesamiento.imagen_id == imagen_id)
+        )
 
     async def obtener_por_imagen(self, imagen_id: int) -> MetricaProcesamiento | None:
         """Devuelve las métricas de una imagen por su ID."""

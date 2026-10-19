@@ -58,6 +58,69 @@ async function request(endpoint, options = {}, signal = null) {
   return data;
 }
 
+/**
+ * Pedido autenticado que devuelve la Response cruda (binarios: PNG, ZIP).
+ * Renueva el token una vez si vence, igual que request().
+ */
+async function requestBinario(endpoint, signal = null) {
+  const pedir = () => {
+    const token = localStorage.getItem('access_token');
+    return fetch(`${API_BASE}${endpoint}`, {
+      signal,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+  };
+
+  let response = await pedir();
+  if (response.status === 401 && await refreshAccessToken()) {
+    response = await pedir();
+  }
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new ApiError(data.detail || `Error ${response.status}`, response.status, data);
+  }
+  return response;
+}
+
+function nombreDesdeDisposition(response, porDefecto) {
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  return match ? match[1] : porDefecto;
+}
+
+function guardarBlob(blob, nombre) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = nombre;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * PNG en gris del backend → valores dBZ (un byte por píxel).
+ * colorSpaceConversion 'none' evita que el navegador ajuste los grises:
+ * cada valor tiene que llegar exacto porque ES el dBZ.
+ */
+async function pngADbz(blob) {
+  const bitmap = await createImageBitmap(blob, {
+    colorSpaceConversion: 'none',
+    premultiplyAlpha: 'none',
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const valores = new Uint8Array(canvas.width * canvas.height);
+  for (let i = 0; i < valores.length; i++) valores[i] = rgba[i * 4];
+  return { ancho: canvas.width, alto: canvas.height, valores };
+}
+
 async function refreshAccessToken() {
   const refreshToken = localStorage.getItem('refresh_token');
   if (!refreshToken) return false;
@@ -150,33 +213,24 @@ export const api = {
 
   obtenerImagen: (id) => request(`/imagenes/${id}`),
 
+  // Carrusel: cuadros de un rango (fecha y hora locales 'AAAA-MM-DDTHH:MM')
+  serieImagenes: (desde, hasta) =>
+    request(`/imagenes/serie?${new URLSearchParams({ desde, hasta })}`),
+
+  // Carrusel: valores dBZ de un cuadro → { ancho, alto, valores: Uint8Array, limites }
+  // limites = [oeste, sur, este, norte] en grados (null si el TIF no está georreferenciado)
+  obtenerVistaDbz: async (id, signal = null) => {
+    const response = await requestBinario(`/imagenes/${id}/vista`, signal);
+    const limites = response.headers.get('X-Limites')?.split(',').map(Number) ?? null;
+    return { ...(await pngADbz(await response.blob())), limites };
+  },
+
   // FIX: el filename se lee del header Content-Disposition que envía el backend,
   // que lo arma con strftime('%Y%m%d_%H%M%S') directo desde la DB → siempre 24h.
   // Ya no se recibe ni construye el filename en el frontend.
   descargarGeotiff: async (id) => {
-    const token = localStorage.getItem('access_token');
-    const response = await fetch(`${API_BASE}/imagenes/${id}/geotiff`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new ApiError(data.detail || `Error ${response.status}`, response.status);
-    }
-
-    // Leer filename desde el header que arma el backend
-    const disposition = response.headers.get('Content-Disposition') || '';
-    const match = disposition.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : `radar_${id}.tif`;
-
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const response = await requestBinario(`/imagenes/${id}/geotiff`);
+    guardarBlob(await response.blob(), nombreDesdeDisposition(response, `radar_${id}.tif`));
   },
 
   // Procesamiento único
@@ -242,26 +296,14 @@ export const api = {
 
   estadoScheduler: () => request('/procesamiento/scheduler/estado'),
 
-  // Descarga lote ZIP
+  // Descarga lote ZIP — desde/hasta con fecha y hora ('AAAA-MM-DDTHH:MM').
+  // Los GeoTIFF van completos (todos los niveles dBZ).
   descargarLote: async (desde, hasta) => {
-    const token = localStorage.getItem('access_token');
-    const response = await fetch(
-      `${API_BASE}/imagenes/descargar-lote?desde=${desde}&hasta=${hasta}`,
-      { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    const response = await requestBinario(
+      `/imagenes/descargar-lote?${new URLSearchParams({ desde, hasta })}`
     );
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new ApiError(data.detail || `Error ${response.status}`, response.status);
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `radar_${desde}_${hasta}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const nombre = nombreDesdeDisposition(response, 'radar_lote.zip');
+    guardarBlob(await response.blob(), nombre);
   },
 
   // Admin

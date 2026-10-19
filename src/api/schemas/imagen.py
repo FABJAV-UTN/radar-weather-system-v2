@@ -39,6 +39,23 @@ class ImagenListaResponse(BaseModel):
     items: list[ImagenResumen]
 
 
+class FrameSerie(BaseModel):
+    """Un cuadro del carrusel: identifica la imagen y su hora."""
+
+    id: int
+    fecha_hora: datetime
+
+
+class SerieResponse(BaseModel):
+    """Imágenes completadas de un rango, en orden cronológico (carrusel)."""
+
+    items: list[FrameSerie]
+    truncada: bool = Field(
+        ...,
+        description="True si el rango tenía más imágenes que el máximo devuelto.",
+    )
+
+
 class ProcesarURLRequest(BaseModel):
     """Request para ejecutar el pipeline desde la URL DACC."""
 

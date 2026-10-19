@@ -1,0 +1,46 @@
+DATOS DE REFERENCIA — CALIBRACIÓN DE LA GEOMETRÍA DEL GIF (Subsistema 1)
+=========================================================================
+Guardados el 19/10/2026. El pipeline NO los necesita (usa el resultado ya
+guardado en templates/geometrias_gif.json); sirven para repetir, auditar o
+extender la calibración (variantes del banco, D4) y para el artículo.
+
+ARCHIVOS
+--------
+ne_10m_admin1_mendoza.geojson
+    Límite de la provincia de Mendoza, extraído de Natural Earth
+    "Admin 1 – States, Provinces", escala 1:10m, versión 5.1.2
+    (dominio público). Fuente:
+    https://github.com/nvkelso/natural-earth-vector/blob/v5.1.2/geojson/ne_10m_admin_1_states_provinces.geojson
+    Se dejó solo el polígono de Mendoza (16 KB en vez de 40 MB).
+
+GIF DE REFERENCIA (no se copian acá, ya están guardados)
+--------------------------------------------------------
+- PROYECTO CLIMA/radar_2026-10-13_gif_originales/radar_871_20261013_154800.gif
+  15:48 hora argentina = 18:48 UTC del 13/10/2026: el GIF con el que se
+  midieron los ejes en km el 14/10 (69,2 y 69,3 px cada 50 km).
+- PROYECTO CLIMA/seco.gif — 19/10/2026 15:14 UTC, sin lluvia.
+También se pueden recuperar desde la base (columna raw_data).
+
+CÓMO REPETIR LA CALIBRACIÓN (desde la raíz del repo)
+----------------------------------------------------
+    uv run python scripts/calibrar_geometria_gif.py \
+        --gif "<ruta>/radar_871_20261013_154800.gif" \
+        --natural-earth datos_referencia/ne_10m_admin1_mendoza.geojson
+Sin --guardar solo muestra el resultado (no modifica geometrias_gif.json).
+
+RESULTADOS
+----------
+                       14/10/2026 (original)   19/10 frame 871     19/10 seco.gif
+  Tamaño de píxel      722,54 m                722,82 m            722,86 m
+  Píxel del 0 km       (204,5; 342,9)          (204,5; 342,8)      (204,5; 342,8)
+  Costo / mediana      2,73 / 1,37 px          5,55 / 2,15 px      5,54 / 2,15 px
+
+- La GEOMETRÍA se reproduce: escala dentro de 0,04 % y 0 km dentro de 0,1 px.
+  Se mantiene la calibración del 14/10 en geometrias_gif.json.
+- El COSTO no se reproduce exacto (mediana 2,15 px ≈ 1,6 km, en vez de
+  1,37 px ≈ 1 km). Sale igual con dos GIF distintos, así que no es la
+  lluvia: lo más probable es que el 14/10 se usara otra versión del mapa de
+  Natural Earth, que no quedó guardada (la calibración se hizo en un entorno
+  temporal). Las cifras reproducibles a citar son las de este archivo
+  (error mediano de 1 a 2 km, ~2 píxeles).
+- La figura GEO_ROBUSTO/calibracion_limite.png es la del 14/10.
