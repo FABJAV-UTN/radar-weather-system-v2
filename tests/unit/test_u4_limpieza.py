@@ -7,6 +7,7 @@ Testea:
 - _is_frame_pixel(rgb)     → detección de colores de marco
 - FRAME_COLORS             → constantes correctas
 - WATERMARK_REGION         → región fija (0, 0, 120, 30)
+- Modelo de mezcla de la marca de agua (observado = W + alfa · D)
 """
 from __future__ import annotations
 
@@ -19,11 +20,13 @@ from PIL import Image
 
 from src.subsistema1.limpiar import (
     FRAME_COLORS,
+    MARCA_AGUA_COMPONENTES,
+    TABLA_COLORES,
+    TABLA_DBZ,
     WATERMARK_REGION,
-    WATERMARK_RGB_MAP,
-    WATERMARK_TO_DBZ,
     clean_image,
     classify_array,
+    construir_tabla_referencia,
     DBZ_COLOR_MAP,
     _is_frame_pixel,
 )
@@ -165,18 +168,75 @@ class TestLimpiezaU4:
             f"El píxel de tormenta en (5,5) no tiene dBZ=54. dBZ obtenido: {dbz_map[5, 5]}"
         )
 
-    def test_u4_limpieza_clasifica_color_de_marca_de_agua(self):
-        """U4: una variación comprimida de watermark se recupera como dBZ y RGB original."""
+    def test_u4_limpieza_clasifica_variacion_comprimida(self):
+        """U4: una variación comprimida del amarillo se recupera como 54 dBZ y RGB puro."""
         arr = np.zeros((40, 140, 3), dtype=np.uint8)
         arr[5, 5] = [255, 250, 20]
 
         clean_rgb, gap_mask, dbz_map = clean_image(Image.fromarray(arr, mode="RGB"))
 
-        assert WATERMARK_TO_DBZ[(255, 255, 17)] == 54
-        assert WATERMARK_RGB_MAP[(255, 255, 17)] == (252, 252, 12)
         assert dbz_map[5, 5] == 54
         assert not gap_mask[5, 5]
         assert np.array_equal(clean_rgb[5, 5], [252, 252, 12])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TEST U4b: modelo de mezcla de la marca de agua
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _mezcla(w: tuple[int, int, int], alfa: float, dbz: int) -> np.ndarray:
+    """Color que deja la marca (W, alfa) sobre el nivel dBZ: W + alfa · D."""
+    d = np.asarray(DBZ_COLOR_MAP[dbz], dtype=np.float32)
+    return np.clip(np.rint(np.asarray(w, dtype=np.float32) + alfa * d), 0, 255).astype(np.uint8)
+
+
+class TestMarcaAguaU4b:
+    """La clasificación usa una tabla única: 16 puros + colores alterados."""
+
+    def test_u4b_los_16_colores_puros_conservan_su_nivel(self):
+        """U4b: cada color puro de la escala sale con SU nivel (regresión 30→20, 60→65, 80→70)."""
+        niveles = list(DBZ_COLOR_MAP)
+        arr = np.array([[DBZ_COLOR_MAP[z] for z in niveles]], dtype=np.uint8)
+
+        assert classify_array(arr)[0].tolist() == niveles
+
+        clean_rgb, _, dbz_map = clean_image(Image.fromarray(arr, mode="RGB"))
+        assert dbz_map[0].tolist() == niveles
+        assert np.array_equal(clean_rgb[0], arr[0])
+
+    def test_u4b_colores_alterados_recuperan_su_nivel(self):
+        """U4b: W + alfa·D vuelve al nivel de D para cada componente y cada nivel."""
+        for w, alfa in MARCA_AGUA_COMPONENTES:
+            for dbz in DBZ_COLOR_MAP:
+                if dbz in (70, 80):
+                    continue  # grises de la escala: ver test de ambigüedad 70/80
+                arr = _mezcla(w, alfa, dbz)[None, None, :]
+                assert classify_array(arr)[0, 0] == dbz, f"W={w} alfa={alfa} nivel={dbz}"
+
+    def test_u4b_letras_sobre_20_dbz_no_salen_como_30(self):
+        """U4b: caso real del 13/10 — letras grises sobre 20 dBZ dan (38,114,38) → 20."""
+        arr = np.array([[[38, 114, 38], [37, 133, 37]]], dtype=np.uint8)
+        assert classify_array(arr)[0].tolist() == [20, 30]
+
+    def test_u4b_marca_sin_eco_queda_en_cero(self):
+        """U4b: el color de la marca sobre fondo negro (D = 0) no es tormenta."""
+        arr = np.array([[w for w, _ in MARCA_AGUA_COMPONENTES]], dtype=np.uint8)
+        assert np.all(classify_array(arr) == 0)
+
+    def test_u4b_tabla_tiene_puros_primero(self):
+        """U4b: la tabla contiene los 16 puros y 16 entradas por componente."""
+        colores, dbz = construir_tabla_referencia()
+        assert colores.shape == (16 * (1 + len(MARCA_AGUA_COMPONENTES)), 3)
+        assert np.array_equal(colores[:16], np.array(list(DBZ_COLOR_MAP.values()), dtype=np.float32))
+        assert np.array_equal(TABLA_COLORES, colores) and np.array_equal(TABLA_DBZ, dbz)
+
+    def test_u4b_ningun_alterado_pisa_un_puro_de_otro_nivel(self):
+        """U4b: ningún color alterado queda más cerca de un puro de otro nivel que el umbral."""
+        puros = TABLA_COLORES[:16]
+        for i in range(16, len(TABLA_COLORES)):
+            dist = np.linalg.norm(puros - TABLA_COLORES[i], axis=1)
+            otros = TABLA_DBZ[:16] != TABLA_DBZ[i]
+            assert dist[otros].min() > 15.0, f"entrada {i} ({TABLA_COLORES[i]}) ambigua"
 
     def test_u4_desde_banco_local(self):
         """U4: Limpieza completa usando test_radar.png y test_radar.gif del banco."""

@@ -6,9 +6,29 @@ Fase 4 del pipeline: Limpieza de píxeles y clasificación dBZ.
 
 Siempre se ejecuta, independientemente de si hubo crop.
 - Elimina colores del marco/borde (#5f9ea0).
-- Clasifica cada píxel al valor dBZ más cercano por distancia euclídea RGB.
-- Recupera directamente los colores alterados de la marca de agua.
-- Detecta los residuos no recuperables y genera máscara de huecos.
+- Clasifica cada píxel en uno de los 16 niveles dBZ con una TABLA DE
+  REFERENCIA única: los 16 colores puros de la escala + los colores que
+  deja la marca de agua del DACC sobre cada nivel (modelo de mezcla).
+- Pinta cada píxel con el color puro de su nivel.
+- Genera la máscara de huecos de la región fija de la esquina.
+
+Modelo de mezcla de la marca de agua
+------------------------------------
+La marca (logotipo "DACC" y texto "Dirección de Agricultura y Contingencias
+Climáticas") se superpone semitransparente sobre el dato:
+
+    observado = W + alfa · D        (recortado a 0-255)
+
+D es el color puro de la escala, W el color que la marca deja sobre fondo
+negro y alfa la fracción del dato que queda visible (≈ 0,85 en el interior
+de la marca; más cerca de 1 en los bordes suavizados). W y alfa se miden con
+scripts/medir_marca_agua.py (GIF seco + GIF con lluvia del 13/10/2026).
+
+Cada color se compara UNA sola vez contra toda la tabla y gana la entrada
+más cercana. Así un color puro de la escala (distancia 0 a sí mismo) nunca
+puede reasignarse a otro nivel, y un color alterado por la marca vuelve a su
+nivel real. La corrección no depende de la posición de la marca ni del
+tamaño de la imagen.
 
 Sin I/O: opera sobre PIL.Image en memoria, devuelve arrays numpy.
 """
@@ -17,28 +37,12 @@ import numpy as np
 from PIL import Image
 
 # ── Constantes ────────────────────────────────────────────────────────────────
+
+# Región fija de la esquina superior izquierda que se marca como hueco para la
+# Fase 5. No es la marca de agua del DACC (que está en el centro del mapa y se
+# corrige por color, ver MARCA_AGUA_COMPONENTES).
 WATERMARK_REGION: dict[str, int] = {"x": 0, "y": 0, "w": 120, "h": 30}
 DEFAULT_COLOR_THRESHOLD: float = 30.0
-
-WATERMARK_TO_DBZ: dict[tuple[int, int, int], int] = {
-    (109, 80, 144): 10,
-    (37, 109, 5): 20,
-    (37, 131, 5): 30,
-    (45, 146, 224): 35,
-    (65, 90, 237): 36,
-    (147, 32, 203): 39,
-    (237, 34, 139): 42,
-    (229, 119, 140): 45,
-    (247, 155, 64): 48,
-    (255, 215, 54): 51,
-    (255, 255, 17): 54,
-    (255, 173, 93): 57,
-    (255, 114, 10): 60,
-    (255, 71, 33): 65,
-    (227, 209, 195): 70,
-    (248, 230, 216): 80,
-}
-WATERMARK_TOLERANCE: float = 40.0
 
 # Colores del marco/borde a eliminar (pueden aparecer como residuos del crop)
 FRAME_COLORS: list[tuple[tuple[int, int, int], float]] = [
@@ -65,12 +69,34 @@ DBZ_COLOR_MAP: dict[int, tuple[int, int, int]] = {
     80: (211, 211, 211),
 }
 
-WATERMARK_RGB_MAP: dict[tuple[int, int, int], tuple[int, int, int]] = {
-    watermark_color: DBZ_COLOR_MAP[dbz]
-    for watermark_color, dbz in WATERMARK_TO_DBZ.items()
-}
+# Componentes de la marca de agua: (W, alfa). Medidos el 30/10/2026 con
+# scripts/medir_marca_agua.py: W = color más frecuente de cada píxel en 51 GIF
+# secos (seco.gif del 19/10 y 50 del 27/10/2026, 17:38-20:22) y alfa ajustado
+# en 64 GIF originales del 13/10/2026 (variante 707 × 842). Los tres primeros
+# son el interior de la marca (logotipo oliva, logotipo azul, letras grises);
+# el resto son sus bordes suavizados y variantes de paleta (alfa más cerca de 1).
+MARCA_AGUA_COMPONENTES: tuple[tuple[tuple[int, int, int], float], ...] = (
+    ((24, 30, 8), 0.86),   # 12195 px — logotipo, parte inferior (oliva)
+    ((11, 19, 27), 0.86),  # 10325 px — logotipo, parte superior (azul)
+    ((37, 37, 37), 0.84),  #  7268 px — letras "DACC" y texto
+    ((28, 28, 28), 0.88),  #  1500 px
+    ((20, 20, 20), 0.92),  #  1134 px
+    ((11, 11, 11), 0.94),  #   839 px
+    ((5, 7, 8), 0.97),     #   789 px
+    ((7, 8, 6), 0.97),     #   776 px
+    ((7, 9, 11), 0.95),    #   553 px
+    ((22, 27, 11), 0.89),  #   346 px
+    ((10, 14, 18), 0.91),  #   219 px
+    ((24, 29, 7), 0.87),   #   211 px
+    ((9, 10, 7), 0.95),    #   148 px
+    ((11, 17, 22), 0.87),  #   131 px
+    ((23, 29, 7), 0.85),   #    82 px
+    ((25, 29, 17), 0.86),  #    81 px
+    ((27, 32, 18), 0.85),  #    24 px
+)
 
-# Arrays precomputados para vectorizar la clasificación
+
+# Arrays precomputados
 DBZ_VALUES: np.ndarray = np.array(list(DBZ_COLOR_MAP.keys()), dtype=np.int32)
 DBZ_COLORS: np.ndarray = np.array(list(DBZ_COLOR_MAP.values()), dtype=np.float32)
 FRAME_COLOR_ARRAY: np.ndarray = np.array(
@@ -79,6 +105,32 @@ FRAME_COLOR_ARRAY: np.ndarray = np.array(
 FRAME_TOLERANCE_ARRAY: np.ndarray = np.array(
     [c[1] for c in FRAME_COLORS], dtype=np.float32
 )
+
+
+def construir_tabla_referencia(
+    componentes: tuple[tuple[tuple[int, int, int], float], ...] = MARCA_AGUA_COMPONENTES,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Arma la tabla de referencia de la clasificación.
+
+    Contiene los 16 colores puros de la escala y, para cada componente
+    (W, alfa) de la marca, los 16 colores alterados W + alfa · D (recortados
+    a 0-255), cada uno con el dBZ de su color puro D.
+
+    Returns:
+        (colores, dbz): arrays (N, 3) float32 y (N,) int32, con
+        N = 16 · (1 + len(componentes)). Las 16 primeras filas son los puros.
+    """
+    colores = [DBZ_COLORS]
+    valores = [DBZ_VALUES]
+    for w, alfa in componentes:
+        alterados = np.clip(np.asarray(w, dtype=np.float32) + alfa * DBZ_COLORS, 0, 255)
+        colores.append(alterados.astype(np.float32))
+        valores.append(DBZ_VALUES)
+    return np.concatenate(colores), np.concatenate(valores)
+
+
+TABLA_COLORES, TABLA_DBZ = construir_tabla_referencia()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -120,28 +172,43 @@ def classify_array(
     threshold: float = DEFAULT_COLOR_THRESHOLD,
 ) -> np.ndarray:
     """
-    Clasifica cada píxel al valor dBZ más cercano por distancia euclídea RGB.
+    Clasifica cada píxel en un nivel dBZ con la tabla de referencia.
 
-    Si la distancia mínima al color dBZ más cercano supera `threshold`,
-    el píxel queda como 0 (no es dato de tormenta).
+    Cada color distinto de la imagen se compara una sola vez contra toda la
+    tabla (16 puros + colores alterados por la marca) y toma el dBZ de la
+    entrada más cercana. Si esa distancia supera `threshold`, el píxel queda
+    en 0 (no es dato de tormenta).
+
+    Se trabaja sobre los colores únicos (un GIF tiene a lo sumo 256), no
+    píxel por píxel.
 
     Args:
         rgb_array: Array numpy (H, W, 3) uint8.
-        threshold: Distancia máxima euclídea para considerar un píxel como dBZ válido.
+        threshold: Distancia euclídea RGB máxima a la entrada más cercana.
 
     Returns:
         Array (H, W) int32 con valores dBZ (0 = no tormenta).
     """
     h, w = rgb_array.shape[:2]
-    flat = rgb_array.reshape(-1, 3).astype(np.float32)
-    diff = flat[:, np.newaxis, :] - DBZ_COLORS[np.newaxis, :, :]
-    distances = np.linalg.norm(diff, axis=2)
-    min_idx = np.argmin(distances, axis=1)
-    min_dist = distances[np.arange(len(flat)), min_idx]
-    result = np.zeros(len(flat), dtype=np.int32)
-    mask = min_dist <= threshold
-    result[mask] = DBZ_VALUES[min_idx[mask]]
-    return result.reshape(h, w)
+    flat = rgb_array.reshape(-1, 3)
+    colores, inversa = np.unique(flat, axis=0, return_inverse=True)
+    inversa = inversa.reshape(-1)
+
+    diff = colores.astype(np.float32)[:, np.newaxis, :] - TABLA_COLORES[np.newaxis, :, :]
+    distancias = np.linalg.norm(diff, axis=2)           # (colores, entradas)
+    idx = np.argmin(distancias, axis=1)
+    dist_min = distancias[np.arange(len(colores)), idx]
+
+    dbz_por_color = np.where(dist_min <= threshold, TABLA_DBZ[idx], 0).astype(np.int32)
+    return dbz_por_color[inversa].reshape(h, w)
+
+
+def dbz_a_rgb(dbz_map: np.ndarray) -> np.ndarray:
+    """Pinta cada píxel con el color puro de su nivel dBZ (0 → negro)."""
+    rgb = np.zeros((*dbz_map.shape, 3), dtype=np.uint8)
+    for dbz, color in DBZ_COLOR_MAP.items():
+        rgb[dbz_map == dbz] = color
+    return rgb
 
 
 def clean_image(
@@ -149,22 +216,23 @@ def clean_image(
     color_threshold: float = DEFAULT_COLOR_THRESHOLD,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Limpia una imagen de radar eliminando el marco y clasificando píxeles dBZ.
+    Limpia una imagen de radar: elimina el marco, corrige la marca de agua y
+    clasifica los píxeles en niveles dBZ.
 
     Pasos:
     1. Eliminar colores del marco/borde (cadet blue).
-    2. Clasificar píxeles por distancia euclídea al mapa dBZ.
-    3. Recuperar colores conocidos de la marca de agua y detectar residuos.
-    4. Construir imagen limpia con solo los píxeles de tormenta.
+    2. Clasificar con la tabla de referencia (puros + modelo de mezcla).
+    3. Generar la máscara de huecos de la región fija de la esquina.
+    4. Construir la imagen limpia con el color puro de cada nivel.
 
     Args:
         image: Imagen PIL (cualquier modo; se convierte a RGB internamente).
-        color_threshold: Distancia máxima al color dBZ para clasificar un píxel.
+        color_threshold: Distancia máxima a la tabla para clasificar un píxel.
 
     Returns:
         Tupla (clean_rgb, gap_mask, dbz_map):
-        - clean_rgb: Array (H, W, 3) uint8. Solo píxeles de tormenta; resto en negro.
-        - gap_mask: Array booleano (H, W). True en huecos espaciales o residuos.
+        - clean_rgb: Array (H, W, 3) uint8. Color puro de cada nivel; resto negro.
+        - gap_mask: Array booleano (H, W). True en huecos de la región fija.
         - dbz_map: Array (H, W) int32. Valor dBZ de cada píxel (0 = no tormenta).
     """
     if getattr(image, "is_animated", False):
@@ -173,37 +241,28 @@ def clean_image(
     rgb = np.array(image.convert("RGB"))
     h, w = rgb.shape[:2]
 
-    # ── Paso 0: eliminar píxeles de marco ────────────────────────────────────
-    flat = rgb.reshape(-1, 3).astype(np.float32)
-    frame_mask = _is_competitive_frame_pixel(flat).reshape(h, w)
+    # ── Paso 1: eliminar píxeles de marco ────────────────────────────────────
+    # Se evalúa sobre los colores únicos para no comparar píxel por píxel.
+    colores, inversa = np.unique(rgb.reshape(-1, 3), axis=0, return_inverse=True)
+    es_marco = _is_competitive_frame_pixel(colores.astype(np.float32))
+    frame_mask = es_marco[inversa.reshape(-1)].reshape(h, w)
     rgb_no_frame = rgb.copy()
     rgb_no_frame[frame_mask] = 0
 
-    # ── Paso 1: restaurar colores de la marca de agua ───────────────────────
-    # La restauración debe ocurrir antes de clasificar el array a dBZ.
-    rgb_float = rgb_no_frame.astype(np.float32)
-    for color_wm, color_orig in WATERMARK_RGB_MAP.items():
-        color_wm_array = np.asarray(color_wm, dtype=np.float32)
-        dist = np.sqrt(np.sum((rgb_float - color_wm_array) ** 2, axis=-1))
-        matches = dist < WATERMARK_TOLERANCE
-        if np.any(matches):
-            rgb_no_frame[matches] = color_orig
-
-    # ── Paso 2: clasificar por dBZ ──────────────────────────────────────────
+    # ── Paso 2: clasificar (puros + colores alterados por la marca) ─────────
     dbz_map = classify_array(rgb_no_frame, color_threshold)
 
-    # ── Paso 3: detectar residuos y generar máscara de huecos ───────────────
+    # ── Paso 3: máscara de huecos de la región fija ─────────────────────────
     storm_mask = dbz_map > 0
     wm = WATERMARK_REGION
     y_start, x_start = wm["y"], wm["x"]
     y_end = min(y_start + wm["h"], h)
     x_end = min(x_start + wm["w"], w)
-    watermark_mask = np.zeros((h, w), dtype=bool)
-    watermark_mask[y_start:y_end, x_start:x_end] = True
-    gap_mask = watermark_mask & ~storm_mask
+    region_mask = np.zeros((h, w), dtype=bool)
+    region_mask[y_start:y_end, x_start:x_end] = True
+    gap_mask = region_mask & ~storm_mask
 
-    # ── Paso 4: imagen limpia ────────────────────────────────────────────────
-    clean_rgb = np.zeros_like(rgb)
-    clean_rgb[storm_mask] = rgb_no_frame[storm_mask]
+    # ── Paso 4: imagen limpia con colores puros ──────────────────────────────
+    clean_rgb = dbz_a_rgb(dbz_map)
 
     return clean_rgb, gap_mask, dbz_map
